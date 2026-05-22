@@ -64,7 +64,7 @@
 - [x] 6.2 Build artifact verified: `npm run build` succeeded, `dist/installer/targets/codebuddy.js` exists.
 - [x] 6.3 Run-through smoke covered by the 20-case codebuddy-target test suite (global + local + idempotency + uninstall + wireProjectSurfaces, all via deterministic API calls in tmpdir).
 - [x] 6.4 Update `docs/add-codebuddy-installer-target-rationale.md` §10 with implementation summary — _done; includes batches, 4-way traceability matrix, blind-spot retrospective, anti-laziness scan, compatibility check, backlog._
-- [ ] 6.5 `openspec archive add-codebuddy-installer-target --yes` — _to be run after user reviews + approves._
+- [x] 6.5 `openspec archive add-codebuddy-installer-target --yes` — _user reviewed P0+P1 batch and approved archive on 2026-05-22._
 
 ## 7. Reporting
 
