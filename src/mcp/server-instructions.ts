@@ -15,12 +15,70 @@
  * burn tokens. Reference only tools that exist on `main`; gate any
  * conditional tools behind feature checks if/when they ship.
  */
+
+import { watchDisabledReason } from '../sync/watch-policy';
+
+/**
+ * Static base instructions — the agent-facing playbook that doesn't
+ * depend on runtime state. Kept as a separate constant so tests and
+ * tools can compare against the canonical baseline.
+ *
+ * Exported under the legacy name for backward compatibility — callers
+ * that previously imported `SERVER_INSTRUCTIONS` still work, they just
+ * don't get the runtime watch-health diagnostic.
+ */
 export const SERVER_INSTRUCTIONS = `# Codegraph — code intelligence over an indexed knowledge graph
 
 Codegraph is a SQLite knowledge graph of every symbol, edge, and file
 in the workspace. Reads are sub-millisecond; the index lags writes by
 about a second through the file watcher. Consult it BEFORE writing or
 editing code, not during.
+
+## 🚫 Mandatory Rules / 强制规则
+
+These rules are **mandatory**, not suggestions. Models that have not
+been fine-tuned on codegraph (DeepSeek, Qwen, GLM, …) frequently fall
+back to grep/Read by training-data habit even when codegraph is faster
+and cheaper. Do not.
+
+1. **NEVER grep / find / Read to look up a symbol by name.** Always use
+   \`codegraph_search\` or \`codegraph_context\` first. Grep returns text
+   matches; codegraph returns the symbol's kind, location, signature,
+   and edges in one call.
+2. **NEVER chain Read + grep to "trace how X works".** Use
+   \`codegraph_context\` (one call) and then ONE \`codegraph_explore\`.
+   Manual trace loops over many files burn 10-30× more tokens for the
+   same answer.
+3. **NEVER call \`codegraph_node\` more than 3 times in a row.** If you
+   need source for ≥3 symbols, switch to \`codegraph_explore\` — it
+   returns them all grouped by file in a single capped call.
+4. **NEVER trust an edge with confidence < 0.7 without verifying.**
+   Edges tagged \`[heur 0.NN ⚠️]\` come from heuristic name matching, not
+   AST analysis. Open the call site (codegraph_node / Read the line) to
+   confirm before relying on the relationship.
+5. **NEVER answer when the response carries \`⚠️ Index age:\` older than
+   30 minutes.** Ask the user to run \`codegraph sync\` first, or call
+   \`codegraph_status\` to confirm the watcher's state. Stale graphs
+   produce confidently-wrong answers.
+
+以下规则为**强制要求**，不是建议。未经 codegraph 微调的模型（DeepSeek、
+Qwen、GLM 等）常因训练习惯而退回 grep / Read，即使 codegraph 更快更省。
+请严格遵守：
+
+1. **绝不**用 grep / find / Read 按名查找符号。优先调用
+   \`codegraph_search\` 或 \`codegraph_context\`。grep 只能给你文本匹配，
+   codegraph 一次返回符号的种类、位置、签名和关系。
+2. **绝不**用 Read + grep 串联来"追踪 X 是怎么工作的"。用一次
+   \`codegraph_context\` 加一次 \`codegraph_explore\` 即可。手动遍历多文件
+   会让 token 多花 10-30 倍。
+3. **绝不**连续调用 \`codegraph_node\` 超过 3 次。如需查看 ≥3 个符号源码，
+   切换到 \`codegraph_explore\` —— 它一次按文件聚合返回全部源码。
+4. **绝不**信任置信度 < 0.7 的关系边。被标 \`[heur 0.NN ⚠️]\` 的边来自启发
+   式名字匹配，不是 AST 分析；先用 \`codegraph_node\` 或 Read 该行确认调用
+   关系，再做出依赖性判断。
+5. **绝不**在响应底部出现 \`⚠️ Index age:\` 且超过 30 分钟时直接回答。先让
+   用户执行 \`codegraph sync\`，或用 \`codegraph_status\` 确认 watcher 状态。
+   过期索引会让你给出"自信但错误"的答案。
 
 ## Answer directly — don't delegate exploration
 
@@ -65,3 +123,86 @@ of calls; a grep/read exploration is dozens.
 - Cross-file resolution is best-effort name matching; ambiguous calls may return multiple candidates.
 - No live correctness validation — that's still the TypeScript compiler / test suite / linter's job. Codegraph supplements those with structural context they don't have.
 `;
+
+/**
+ * Options for {@link buildServerInstructions}. Both fields are optional
+ * so callers without the relevant info still get a valid (warning-free)
+ * playbook back.
+ */
+export interface BuildServerInstructionsOptions {
+  /**
+   * Project root path, when known at the time of the `initialize` call.
+   * Used to consult `watchDisabledReason()` so the agent knows up-front
+   * whether live file-watching is active for this project.
+   *
+   * When `undefined`, no project-specific watch warning is appended;
+   * the agent can still call `codegraph_status` mid-session to check.
+   */
+  projectRoot?: string | undefined;
+
+  /**
+   * Test / advanced override: explicit "watch is disabled because X"
+   * reason to inject. When omitted, the function consults
+   * `watchDisabledReason(projectRoot)` directly. Used by unit tests so
+   * the watch policy logic doesn't have to be mocked end-to-end.
+   */
+  watchReasonOverride?: string | null | undefined;
+}
+
+/**
+ * Build the SERVER_INSTRUCTIONS text for a specific MCP session — P0/T4.
+ *
+ * Always returns the static playbook unchanged at the top, so existing
+ * agent behaviors don't shift. When the project's file-watcher is
+ * disabled (WSL2 `/mnt/*` drive, explicit `CODEGRAPH_NO_WATCH=1`, etc.)
+ * we append a short ⚠️ section so the agent knows the index won't
+ * auto-refresh and can either ask the user to run `codegraph sync` or
+ * lower its trust in the staleness of any answer.
+ *
+ * Why dynamic instead of a static "watch may be disabled" note:
+ *   • False alarms erode the agent's trust in warnings; we only want
+ *     ⚠️ when watch is actually off for this session.
+ *   • The disabled reason is informative ("WSL2 /mnt drive" vs an env
+ *     var) and is worth surfacing verbatim — agents and humans both
+ *     benefit from the exact root cause.
+ */
+export function buildServerInstructions(
+  options: BuildServerInstructionsOptions = {}
+): string {
+  const { projectRoot, watchReasonOverride } = options;
+
+  let watchReason: string | null;
+  if (watchReasonOverride !== undefined) {
+    watchReason = watchReasonOverride;
+  } else if (projectRoot) {
+    watchReason = watchDisabledReason(projectRoot);
+  } else {
+    // No project root resolved yet — defer the watch check to the first
+    // tool call. We DON'T preemptively warn here: a default playbook
+    // with a maybe-stale-watch ⚠️ on every session is exactly the kind
+    // of false alarm that trains agents to ignore warnings.
+    watchReason = null;
+  }
+
+  if (!watchReason) {
+    return SERVER_INSTRUCTIONS;
+  }
+
+  // Append the warning section as the LAST block so the static playbook
+  // above it stays cache-friendly across sessions (agents that key on
+  // a hash of the prefix benefit when only the suffix varies).
+  const warning = `
+
+## ⚠️ Index Sync Status
+
+Live file-watching is **disabled** for this project: ${watchReason}.
+
+The index reflects the state at \`codegraph index\` / \`codegraph sync\`
+time and **will not auto-update** when files change. Treat the index as
+a snapshot. After the user edits files in this session, ask them to run
+\`codegraph sync\` (or call \`codegraph_status\` to confirm whether the
+watcher recovered) before relying on call graphs or impact analysis.
+`;
+
+  return SERVER_INSTRUCTIONS + warning;
+}

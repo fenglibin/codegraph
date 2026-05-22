@@ -121,6 +121,7 @@ export class LiquidExtractor {
         source: fileNodeId,
         target: importNodeId,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
 
       // Create a component node for the snippet reference
@@ -147,6 +148,7 @@ export class LiquidExtractor {
         source: fileNodeId,
         target: nodeId,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
 
       // Add unresolved reference to the snippet file
@@ -195,6 +197,7 @@ export class LiquidExtractor {
         source: fileNodeId,
         target: importNodeId,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
 
       // Create a component node for the section reference
@@ -221,6 +224,7 @@ export class LiquidExtractor {
         source: fileNodeId,
         target: nodeId,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
 
       // Add unresolved reference to the section file
@@ -286,6 +290,7 @@ export class LiquidExtractor {
         source: fileNodeId,
         target: nodeId,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
     }
   }
@@ -326,6 +331,7 @@ export class LiquidExtractor {
         source: fileNodeId,
         target: nodeId,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
     }
   }

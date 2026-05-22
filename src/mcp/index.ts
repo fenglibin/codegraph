@@ -20,7 +20,7 @@ import CodeGraph, { findNearestCodeGraphRoot } from '../index';
 import { watchDisabledReason } from '../sync';
 import { StdioTransport, JsonRpcRequest, JsonRpcNotification, ErrorCodes } from './transport';
 import { tools, ToolHandler } from './tools';
-import { SERVER_INSTRUCTIONS } from './server-instructions';
+import { buildServerInstructions } from './server-instructions';
 
 /**
  * Convert a file:// URI to a filesystem path.
@@ -381,13 +381,22 @@ export class MCPServer {
     // version. The `instructions` field is surfaced by MCP clients in the
     // agent's system prompt automatically — it's the right place for the
     // universal tool-selection playbook, ahead of individual tool descriptions.
+    //
+    // P0/T4 — When we know the project root at this point, consult
+    // `watchDisabledReason` so the agent learns up-front that live file-
+    // watching is off (e.g. WSL2 /mnt drive, CODEGRAPH_NO_WATCH=1). When we
+    // don't know the root yet (deferred path resolution via roots/list),
+    // buildServerInstructions falls back to the static playbook — the agent
+    // can still discover the state via codegraph_status mid-session.
     this.transport.sendResult(request.id, {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {
         tools: {},
       },
       serverInfo: SERVER_INFO,
-      instructions: SERVER_INSTRUCTIONS,
+      instructions: buildServerInstructions({
+        projectRoot: explicitPath ?? undefined,
+      }),
     });
 
     // If we know the project dir, kick off init in the background now. Tool

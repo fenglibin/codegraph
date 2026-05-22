@@ -131,6 +131,7 @@ export class DfmExtractor {
           source: stack[stack.length - 1]!,
           target: nodeId,
           kind: 'contains',
+          provenance: 'tree-sitter',
         });
         stack.push(nodeId);
         continue;

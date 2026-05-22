@@ -235,16 +235,33 @@ function serializeNode(node: Node): Record<string, unknown> {
 }
 
 /**
- * Serialize an edge for JSON output
+ * Serialize an edge for JSON output.
+ *
+ * P0/T2 — `provenance` and `metadata.confidence` are now part of the
+ * exposed shape so JSON consumers (MCP clients, debug tools) can
+ * distinguish AST-direct edges from heuristic name-matched ones and
+ * filter out low-trust relationships. Both fields are optional in the
+ * persisted Edge type, so we only emit them when present to keep the
+ * JSON tight on legacy / pre-stamped data.
  */
 function serializeEdge(edge: Edge): Record<string, unknown> {
-  return {
+  const out: Record<string, unknown> = {
     source: edge.source,
     target: edge.target,
     kind: edge.kind,
     line: edge.line,
     column: edge.column,
   };
+  if (edge.provenance !== undefined && edge.provenance !== null) {
+    out.provenance = edge.provenance;
+  }
+  if (edge.metadata && typeof edge.metadata === 'object') {
+    const conf = (edge.metadata as Record<string, unknown>).confidence;
+    if (typeof conf === 'number' && conf >= 0 && conf <= 1) {
+      out.confidence = conf;
+    }
+  }
+  return out;
 }
 
 /**

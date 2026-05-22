@@ -644,6 +644,16 @@ export class CodeGraph {
     return this.queries.getAllFiles();
   }
 
+  /**
+   * Most recent `indexed_at` timestamp across all tracked files (epoch ms),
+   * or `null` when nothing is indexed yet. The MCP layer surfaces this as
+   * "Index age: Xm ago" so LLMs can detect stale graphs after a watcher
+   * failure or a long-idle project.
+   */
+  getMaxIndexedAt(): number | null {
+    return this.queries.getMaxIndexedAt();
+  }
+
   // ===========================================================================
   // Graph Query Methods
   // ===========================================================================

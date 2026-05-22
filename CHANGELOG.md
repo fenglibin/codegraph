@@ -30,19 +30,25 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     rules, so non-English models (DeepSeek, Qwen, GLM, etc.) also respect
     codegraph's trust signals
 
+### Added
 - **CodeBuddy IDE support**: `codegraph install --target=codebuddy` now
   configures Tencent CodeBuddy IDE alongside the existing four agents.
   Writes MCP server entry to `~/.codebuddy/mcp.json` (global) or
   `<workspace>/.mcp.json` (local, supported since CodeBuddy v4.0.0)
   using the same `{"mcpServers": {...}}` shape Claude / Cursor use.
   Writes agent instructions to `~/.codebuddy/rules/codegraph/RULE.mdc`
-  with `.mdc` frontmatter `alwaysApply: true`, or to
-  `<workspace>/CODEBUDDY.md` as a marker-delimited section (with
-  `AGENTS.md` fallback). `--target=auto` picks up CodeBuddy when
-  `~/.codebuddy/` or `.codebuddy/` is present. `codegraph init` now
-  also wires the project-level `CODEBUDDY.md`.
+  with `.mdc` frontmatter `alwaysApply: true` so the rule auto-loads
+  into every CodeBuddy session, or to `<workspace>/CODEBUDDY.md` as a
+  marker-delimited section. When a project has no `CODEBUDDY.md` but
+  does ship an `AGENTS.md`, the marker block is written into
+  `AGENTS.md` instead — honoring CodeBuddy's documented compat path.
+  `--target=auto` picks up CodeBuddy when `~/.codebuddy/` (global) or
+  `<workspace>/.codebuddy/` / `.mcp.json` / `CODEBUDDY.md` (local) is
+  present. `codegraph init` now also wires the project-level
+  `CODEBUDDY.md` for users who configured CodeBuddy globally —
+  mirroring the existing Cursor flow.
 
-### Fixed
+  ### Fixed
 - **Watcher test harness**: `waitFor` helper now accepts an optional
   `AbortSignal` to stop recursive `setTimeout` chains on test teardown,
   eliminating a spurious `database is not open` unhandled error. Five

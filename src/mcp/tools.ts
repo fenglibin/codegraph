@@ -41,6 +41,143 @@ const CONTAINER_NODE_KINDS = new Set<NodeKind>([
   'class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'namespace', 'module',
 ]);
 
+/**
+ * Edge-trust thresholds — P0/T2.
+ *
+ * `confidence` is a per-edge score (0–1) attached by the resolution
+ * layer (see `name-matcher.ts`). Edges scoring below this threshold are
+ * heuristic name-match guesses that the LLM should verify before
+ * relying on them. Picked at 0.7 to align with `matchByExactName`'s
+ * "narrow match" tier — anything below is a fuzzy/cross-language match.
+ *
+ * Exported (with `_internal` prefix) for unit testing only — not part
+ * of the public MCP API. Do not import outside `__tests__/`.
+ */
+export const _internal_CONFIDENCE_LOW_THRESHOLD = 0.7;
+
+/**
+ * Read `metadata.confidence` from an edge as a number, or null when
+ * absent / malformed. Defensive: `metadata` is `Record<string, unknown>`
+ * so we cannot assume a number is there.
+ *
+ * Exported as `_internal_readEdgeConfidence` for unit tests.
+ */
+export function _internal_readEdgeConfidence(edge: Edge | undefined): number | null {
+  if (!edge || !edge.metadata) return null;
+  const raw = (edge.metadata as Record<string, unknown>).confidence;
+  return typeof raw === 'number' && raw >= 0 && raw <= 1 ? raw : null;
+}
+
+/**
+ * Compact trust tag for a single edge, e.g. ` [ast]` for AST-direct
+ * tree-sitter edges, ` [heur 0.85]` for high-confidence heuristic
+ * matches, or ` [heur 0.5 ⚠️]` for low-confidence ones the LLM should
+ * double-check. Returns '' when no edge is provided so callers can
+ * concatenate unconditionally.
+ *
+ * Edges with `provenance === null/undefined` (pre-T1 legacy DB rows
+ * that pre-date the provenance stamping fix) fall through to the
+ * heuristic branch and render as `[heur ?]` — semantically correct
+ * because (a) every pre-T1 edge that survived the resolver IS a
+ * heuristic match by construction, and (b) the trailing "?" already
+ * signals reduced trust to the LLM. Run `codegraph reindex` to upgrade
+ * old databases and recover proper trust tags.
+ *
+ * Exported as `_internal_formatEdgeTag` for unit tests.
+ */
+export function _internal_formatEdgeTag(edge: Edge | undefined): string {
+  if (!edge) return '';
+  if (edge.provenance === 'tree-sitter' || edge.provenance === 'scip') {
+    return ' [ast]';
+  }
+  // 'heuristic' or unknown provenance — fall through to confidence display.
+  const conf = _internal_readEdgeConfidence(edge);
+  if (conf === null) {
+    // Heuristic edge with no confidence is itself a smell — flag it.
+    return ' [heur ?]';
+  }
+  const warn = conf < _internal_CONFIDENCE_LOW_THRESHOLD ? ' ⚠️' : '';
+  return ` [heur ${conf.toFixed(2)}${warn}]`;
+}
+
+/**
+ * Index-age thresholds — P0/T3.
+ *
+ * The MCP layer appends an "Index age: Xm ago" footer to every tool
+ * response so LLMs can spot stale graphs (watcher silently disabled,
+ * project idle for hours, etc.). Past this threshold the footer flips
+ * to a ⚠️ warning. 30 minutes is the sweet spot:
+ *   • fresh enough that a busy dev session never sees the warning
+ *   • stale enough that a forgotten background server gets flagged
+ *   • aligned with FileWatcher's typical debounce + sync window
+ *
+ * Exported (with `_internal_` prefix) so cross-module drift guards in
+ * the test suite can assert that `SERVER_INSTRUCTIONS` and
+ * `INSTRUCTIONS_TEMPLATE` mention the same minute count this constant
+ * defines. Not part of the public MCP API.
+ */
+export const _internal_INDEX_AGE_STALE_MS = 30 * 60 * 1000;
+
+/**
+ * Convenience accessor for tests: minute count derived from
+ * `_internal_INDEX_AGE_STALE_MS`. Avoids forcing every drift-guard
+ * test to re-derive the conversion (and re-introduce the very rounding
+ * bug `_internal_formatIndexAgeFooter` had to fix in T3).
+ */
+export const _internal_INDEX_AGE_STALE_MINUTES =
+  _internal_INDEX_AGE_STALE_MS / 60_000;
+
+/**
+ * Tools that are themselves the source of truth for index age — the
+ * footer would be redundant noise on these. Currently only `status`
+ * qualifies; explore/files/etc. all reflect the indexed state and
+ * benefit from a freshness signal.
+ */
+const TOOLS_SKIP_INDEX_AGE = new Set<string>(['codegraph_status']);
+
+/**
+ * Format a single epoch-ms timestamp as the human-friendly age footer
+ * we append to MCP tool output. Returns '' when no timestamp is
+ * available (e.g. empty index) so callers can concatenate freely.
+ *
+ * Exported as `_internal_formatIndexAgeFooter` for unit testing —
+ * `now` is injected so tests don't depend on the wall clock.
+ */
+export function _internal_formatIndexAgeFooter(
+  maxIndexedAt: number | null,
+  now: number = Date.now()
+): string {
+  if (maxIndexedAt === null || maxIndexedAt <= 0) return '';
+  const ageMs = Math.max(0, now - maxIndexedAt);
+  // Bucket the label by the raw ms value rather than by `Math.round(ageMs/60000)`:
+  // 30 seconds rounds up to 1 minute, which would skip the "<1m" branch entirely
+  // and confuse users about how fresh the index is. Threshold-by-ms is the
+  // honest measure.
+  let ageLabel: string;
+  if (ageMs < 60_000) {
+    ageLabel = '<1m';
+  } else if (ageMs < 3_600_000) {
+    ageLabel = `${Math.round(ageMs / 60_000)}m`;
+  } else {
+    ageLabel = `${(ageMs / 3_600_000).toFixed(1)}h`;
+  }
+  if (ageMs >= INDEX_AGE_STALE_MS) {
+    return (
+      `\n\n_⚠️ Index age: ${ageLabel} ago — older than 30m, results may be ` +
+      `stale. Run \`codegraph sync\` or check \`codegraph status\` for the watcher state._`
+    );
+  }
+  return `\n\n_Index age: ${ageLabel} ago_`;
+}
+
+// Module-private aliases used throughout this file — cheaper than
+// renaming every call site and keeps the public export names stable.
+const CONFIDENCE_LOW_THRESHOLD = _internal_CONFIDENCE_LOW_THRESHOLD;
+const readEdgeConfidence = _internal_readEdgeConfidence;
+const formatEdgeTag = _internal_formatEdgeTag;
+const formatIndexAgeFooter = _internal_formatIndexAgeFooter;
+const INDEX_AGE_STALE_MS = _internal_INDEX_AGE_STALE_MS;
+
 /** Last `::` / `.` / `/`-separated segment of a qualified symbol. */
 function lastQualifierPart(symbol: string): string {
   const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
@@ -621,32 +758,93 @@ export class ToolHandler {
   /**
    * Execute a tool by name
    */
+  /**
+   * Execute a tool by name.
+   *
+   * Wraps `dispatch()` with two responsibilities the dispatchers
+   * shouldn't have to repeat:
+   *   1. Outer try/catch turning unexpected exceptions into a uniform
+   *      error response.
+   *   2. P0/T3 — appending an index-age footer to successful, non-status
+   *      responses so LLMs can detect stale graphs.
+   *
+   * The split keeps `dispatch` purely about "name → handler" routing
+   * and concentrates cross-cutting concerns here.
+   */
   async execute(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    let result: ToolResult;
     try {
-      switch (toolName) {
-        case 'codegraph_search':
-          return await this.handleSearch(args);
-        case 'codegraph_context':
-          return await this.handleContext(args);
-        case 'codegraph_callers':
-          return await this.handleCallers(args);
-        case 'codegraph_callees':
-          return await this.handleCallees(args);
-        case 'codegraph_impact':
-          return await this.handleImpact(args);
-        case 'codegraph_explore':
-          return await this.handleExplore(args);
-        case 'codegraph_node':
-          return await this.handleNode(args);
-        case 'codegraph_status':
-          return await this.handleStatus(args);
-        case 'codegraph_files':
-          return await this.handleFiles(args);
-        default:
-          return this.errorResult(`Unknown tool: ${toolName}`);
-      }
+      result = await this.dispatch(toolName, args);
     } catch (err) {
       return this.errorResult(`Tool execution failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Footer injection: skip status (which is itself the freshness
+    // truth source) and skip explicit error responses (where freshness
+    // adds noise rather than signal). Resolution failures of getCodeGraph
+    // are tolerated — the footer simply degrades to '' so we never
+    // surface a confusing partial signal.
+    if (TOOLS_SKIP_INDEX_AGE.has(toolName) || result.isError) {
+      return result;
+    }
+    try {
+      const cg = this.tryGetCodeGraph(args.projectPath as string | undefined);
+      if (cg) {
+        const footer = formatIndexAgeFooter(cg.getMaxIndexedAt());
+        if (footer && result.content.length > 0) {
+          const last = result.content[result.content.length - 1]!;
+          if (last.type === 'text') {
+            last.text = last.text + footer;
+          }
+        }
+      }
+    } catch {
+      // Footer is purely informational. Any failure (cg not loaded,
+      // DB transient error, etc.) must not break the actual response.
+    }
+    return result;
+  }
+
+  /**
+   * Pure name-to-handler dispatch. Kept private so external callers
+   * always go through `execute()` and pick up cross-cutting concerns.
+   */
+  private async dispatch(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    switch (toolName) {
+      case 'codegraph_search':
+        return await this.handleSearch(args);
+      case 'codegraph_context':
+        return await this.handleContext(args);
+      case 'codegraph_callers':
+        return await this.handleCallers(args);
+      case 'codegraph_callees':
+        return await this.handleCallees(args);
+      case 'codegraph_impact':
+        return await this.handleImpact(args);
+      case 'codegraph_explore':
+        return await this.handleExplore(args);
+      case 'codegraph_node':
+        return await this.handleNode(args);
+      case 'codegraph_status':
+        return await this.handleStatus(args);
+      case 'codegraph_files':
+        return await this.handleFiles(args);
+      default:
+        return this.errorResult(`Unknown tool: ${toolName}`);
+    }
+  }
+
+  /**
+   * Best-effort CodeGraph lookup that swallows the "not initialized"
+   * exception `getCodeGraph` raises. Used by the index-age footer
+   * injection — we'd rather return the response without a footer than
+   * propagate a noisy error from a purely informational concern.
+   */
+  private tryGetCodeGraph(projectPath: string | undefined): CodeGraph | null {
+    try {
+      return this.getCodeGraph(projectPath);
+    } catch {
+      return null;
     }
   }
 
@@ -756,14 +954,20 @@ export class ToolHandler {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
-    // Aggregate callers across all matching symbols
+    // Aggregate callers across all matching symbols — keep the first
+    // edge we see per caller so we can surface its confidence/provenance
+    // tag downstream (T2). When a caller appears via multiple matched
+    // symbols, the first wins; that's deterministic enough for display
+    // purposes and avoids hiding legitimate AST edges behind heuristics.
     const seen = new Set<string>();
     const allCallers: Node[] = [];
+    const edgesByCaller = new Map<string, Edge>();
     for (const node of allMatches.nodes) {
       for (const c of cg.getCallers(node.id)) {
         if (!seen.has(c.node.id)) {
           seen.add(c.node.id);
           allCallers.push(c.node);
+          edgesByCaller.set(c.node.id, c.edge);
         }
       }
     }
@@ -772,7 +976,12 @@ export class ToolHandler {
       return this.textResult(`No callers found for "${symbol}"${allMatches.note}`);
     }
 
-    const formatted = this.formatNodeList(allCallers.slice(0, limit), `Callers of ${symbol}`) + allMatches.note;
+    const formatted =
+      this.formatNodeList(
+        allCallers.slice(0, limit),
+        `Callers of ${symbol}`,
+        edgesByCaller
+      ) + allMatches.note;
     return this.textResult(this.truncateOutput(formatted));
   }
 
@@ -791,14 +1000,18 @@ export class ToolHandler {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
 
-    // Aggregate callees across all matching symbols
+    // Aggregate callees across all matching symbols — same edge-keeping
+    // strategy as handleCallers (T2): first-seen edge wins so the trust
+    // tag reflects the strongest evidence we found for each callee.
     const seen = new Set<string>();
     const allCallees: Node[] = [];
+    const edgesByCallee = new Map<string, Edge>();
     for (const node of allMatches.nodes) {
       for (const c of cg.getCallees(node.id)) {
         if (!seen.has(c.node.id)) {
           seen.add(c.node.id);
           allCallees.push(c.node);
+          edgesByCallee.set(c.node.id, c.edge);
         }
       }
     }
@@ -807,7 +1020,12 @@ export class ToolHandler {
       return this.textResult(`No callees found for "${symbol}"${allMatches.note}`);
     }
 
-    const formatted = this.formatNodeList(allCallees.slice(0, limit), `Callees of ${symbol}`) + allMatches.note;
+    const formatted =
+      this.formatNodeList(
+        allCallees.slice(0, limit),
+        `Callees of ${symbol}`,
+        edgesByCallee
+      ) + allMatches.note;
     return this.textResult(this.truncateOutput(formatted));
   }
 
@@ -1755,13 +1973,50 @@ export class ToolHandler {
     return lines.join('\n');
   }
 
-  private formatNodeList(nodes: Node[], title: string): string {
+  private formatNodeList(
+    nodes: Node[],
+    title: string,
+    edges?: Map<string, Edge>
+  ): string {
     const lines: string[] = [`## ${title} (${nodes.length} found)`, ''];
+
+    // P0/T2 — Surface edge trust signals (provenance + confidence) so
+    // LLMs can distinguish AST-direct relationships from heuristic
+    // name-matched ones. We compute summary first to add a top warning
+    // when low-confidence edges dominate the result, then per-row tags.
+    let lowConfidenceCount = 0;
+    let heuristicCount = 0;
+    if (edges) {
+      for (const node of nodes) {
+        const edge = edges.get(node.id);
+        if (!edge) continue;
+        if (edge.provenance === 'heuristic') heuristicCount++;
+        const conf = readEdgeConfidence(edge);
+        if (conf !== null && conf < CONFIDENCE_LOW_THRESHOLD) {
+          lowConfidenceCount++;
+        }
+      }
+      if (lowConfidenceCount > 0) {
+        lines.push(
+          `> ⚠️  ${lowConfidenceCount} of ${nodes.length} relationship(s) below ` +
+            `confidence ${CONFIDENCE_LOW_THRESHOLD} — verify with the source ` +
+            `before relying on them (heuristic name-matching, not AST-direct).`,
+          ''
+        );
+      } else if (heuristicCount > 0) {
+        lines.push(
+          `> ${heuristicCount} of ${nodes.length} relationship(s) are heuristic ` +
+            `(name-matched, not AST-direct). Confidence shown per row.`,
+          ''
+        );
+      }
+    }
 
     for (const node of nodes) {
       const location = node.startLine ? `:${node.startLine}` : '';
-      // Compact: just name, kind, location
-      lines.push(`- ${node.name} (${node.kind}) - ${node.filePath}${location}`);
+      const tag = edges ? formatEdgeTag(edges.get(node.id)) : '';
+      // Compact: name, kind, location, optional trust tag
+      lines.push(`- ${node.name} (${node.kind}) - ${node.filePath}${location}${tag}`);
     }
 
     return lines.join('\n');
@@ -1775,6 +2030,33 @@ export class ToolHandler {
       `## Impact: "${symbol}" affects ${nodeCount} symbols`,
       '',
     ];
+
+    // P0/T2 — Summarize edge trust across the impact subgraph so the
+    // LLM knows how much of the radius came from heuristics vs AST.
+    // The full subgraph carries every traversed edge; we count rather
+    // than render each one to keep the impact report compact.
+    let astEdgeCount = 0;
+    let heuristicEdgeCount = 0;
+    let lowConfidenceEdgeCount = 0;
+    for (const edge of impact.edges) {
+      if (edge.provenance === 'tree-sitter' || edge.provenance === 'scip') {
+        astEdgeCount++;
+      } else if (edge.provenance === 'heuristic') {
+        heuristicEdgeCount++;
+        const conf = readEdgeConfidence(edge);
+        if (conf !== null && conf < CONFIDENCE_LOW_THRESHOLD) {
+          lowConfidenceEdgeCount++;
+        }
+      }
+    }
+    if (impact.edges.length > 0) {
+      const trust =
+        `> Trust: ${astEdgeCount} AST edges, ${heuristicEdgeCount} heuristic edges` +
+        (lowConfidenceEdgeCount > 0
+          ? ` (${lowConfidenceEdgeCount} below confidence ${CONFIDENCE_LOW_THRESHOLD} ⚠️)`
+          : '');
+      lines.push(trust, '');
+    }
 
     // Group by file
     const byFile = new Map<string, Node[]>();

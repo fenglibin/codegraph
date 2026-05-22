@@ -12,16 +12,26 @@ import { FileWatcher } from '../src/sync/watcher';
 import CodeGraph from '../src/index';
 
 /**
- * Helper to wait for a condition with timeout
+ * Helper to wait for a condition with timeout.
+ *
+ * Accepts an optional AbortSignal so callers (e.g. `afterEach`) can cancel
+ * the recursive setTimeout chain when the test ends. Without this, a vitest
+ * timeout can leave a pending `setTimeout(check, ...)` that fires after the
+ * test's resources (DB handle, watcher, etc.) are torn down — which surfaces
+ * as confusing `database is not open` unhandled errors and false-positive
+ * test failures on subsequent runs.
  */
 function waitFor(
   condition: () => boolean,
   timeoutMs = 10000,
-  intervalMs = 100
+  intervalMs = 100,
+  signal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('aborted'));
     const start = Date.now();
     const check = () => {
+      if (signal?.aborted) return reject(new Error('aborted'));
       if (condition()) return resolve();
       if (Date.now() - start > timeoutMs) return reject(new Error('waitFor timed out'));
       setTimeout(check, intervalMs);
@@ -29,6 +39,45 @@ function waitFor(
     check();
   });
 }
+
+describe('waitFor helper (test-internal)', () => {
+  it('normal: resolves immediately when condition is already true', async () => {
+    const start = Date.now();
+    await waitFor(() => true, 5000, 100);
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+
+  it('boundary: pre-aborted signal rejects without ever calling condition', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const condition = vi.fn(() => false);
+    await expect(waitFor(condition, 5000, 100, ac.signal)).rejects.toThrow(
+      'aborted'
+    );
+    expect(condition).not.toHaveBeenCalled();
+  });
+
+  it('exception: signal aborted mid-flight stops the polling loop', async () => {
+    const ac = new AbortController();
+    let callCount = 0;
+    const condition = () => {
+      callCount += 1;
+      // Abort on the 3rd poll so we can prove the loop actually stops.
+      if (callCount === 3) ac.abort();
+      return false;
+    };
+
+    await expect(waitFor(condition, 5000, 10, ac.signal)).rejects.toThrow(
+      'aborted'
+    );
+
+    // Capture the call count at the moment of rejection and confirm no
+    // additional polls fire after a short settle delay.
+    const callsAtReject = callCount;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(callsAtReject);
+  });
+});
 
 describe('FileWatcher', () => {
   let testDir: string;
@@ -209,8 +258,17 @@ describe('FileWatcher', () => {
 
   describe('CodeGraph integration', () => {
     let cg: CodeGraph;
+    let abortController: AbortController;
+
+    beforeEach(() => {
+      abortController = new AbortController();
+    });
 
     afterEach(() => {
+      // Abort any in-flight waitFor BEFORE closing the DB. Otherwise a
+      // recursive setTimeout(check, intervalMs) that was already scheduled
+      // can fire after cg.close() and crash with `database is not open`.
+      abortController.abort();
       if (cg) cg.close();
     });
 
@@ -262,11 +320,18 @@ describe('FileWatcher', () => {
         'export function added() { return 42; }'
       );
 
-      // Wait for auto-sync to pick it up
-      await waitFor(() => {
-        const stats = cg.getStats();
-        return stats.nodeCount > initialNodes;
-      }, 10000);
+      // Wait for auto-sync to pick it up. Pass the AbortSignal so that if
+      // the test times out at the vitest level, the recursive check loop
+      // stops immediately and does not touch a closed DB in afterEach.
+      await waitFor(
+        () => {
+          const stats = cg.getStats();
+          return stats.nodeCount > initialNodes;
+        },
+        10000,
+        100,
+        abortController.signal
+      );
 
       // The new function should be in the graph
       const results = cg.searchNodes('added');

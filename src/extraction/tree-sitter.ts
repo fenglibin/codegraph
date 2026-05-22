@@ -437,6 +437,7 @@ export class TreeSitterExtractor {
           source: parentId,
           target: id,
           kind: 'contains',
+          provenance: 'tree-sitter',
         });
       }
     }
@@ -701,6 +702,7 @@ export class TreeSitterExtractor {
           source: ownerNode.id,
           target: methodNode.id,
           kind: 'contains',
+          provenance: 'tree-sitter',
         });
       }
     }

@@ -19,6 +19,7 @@
 [![Codex CLI](https://img.shields.io/badge/Codex_CLI-supported-blueviolet.svg)](#)
 [![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#)
 [![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-supported-blueviolet.svg)](#)
+[![CodeBuddy IDE](https://img.shields.io/badge/CodeBuddy_IDE-supported-blueviolet.svg)](#)
 
 </div>
 
@@ -160,15 +161,6 @@ CodeGraph 检测 Web 框架路由文件，产生 `route` 节点，通过 `refere
 npx @xuefadevdev/codegraph
 ```
 
-<<<<<<< Updated upstream
-The installer will:
-- Ask which agent(s) to configure — auto-detects installed ones from: **Claude Code**, **Cursor**, **Codex CLI**, **opencode**, **Hermes Agent**
-- Prompt to install `codegraph` on your PATH (so agents can launch the MCP server)
-- Ask whether configs apply to all your projects or just this one
-- Write each chosen agent's MCP server config + an instructions file (e.g. `CLAUDE.md`, `.cursor/rules/codegraph.mdc`, `~/.codex/AGENTS.md`)
-- Set up auto-allow permissions when Claude Code is one of the targets
-- Initialize your current project (local installs only)
-=======
 安装程序会：
 - 询问要为哪些 Agent 配置 — 自动检测已安装的：**Claude Code**, **Cursor**, **Codex CLI**, **opencode**, **Hermes Agent**, **CodeBuddy IDE**
 - 提示将 `codegraph` 安装到 PATH（以便 Agent 能启动 MCP 服务器）
@@ -176,7 +168,6 @@ The installer will:
 - 为每个选中的 Agent 写入 MCP 服务器配置 + 指令文件（例如 `CLAUDE.md`、`.cursor/rules/codegraph.mdc`、`~/.codex/AGENTS.md`、`~/.codebuddy/rules/codegraph/RULE.mdc`）
 - 当目标是 Claude Code 时自动设置权限白名单
 - 初始化当前项目（本地安装场景下）
->>>>>>> Stashed changes
 
 **非交互式（脚本/CI）：**
 
@@ -600,13 +591,7 @@ MIT
 ---
 
 <div align="center">
-
-<<<<<<< Updated upstream
-**Made for AI coding agents — Claude Code, Cursor, Codex CLI, opencode, and Hermes Agent**
-=======
 **为 AI 编程代理而生 — Claude Code、Cursor、Codex CLI、opencode、Hermes Agent 和 CodeBuddy IDE**
->>>>>>> Stashed changes
-
 [代码仓库](https://cnb.cool/xuefadev/codegraph)
 
 </div>

@@ -704,7 +704,7 @@ flowchart LR
 flowchart TD
     A[在测试机器跑<br/>真实 CodeBuddy + DeepSeek 对话] --> B[记录每次<br/>tool call 序列]
     B --> C[标注：<br/>是否用了 codegraph？<br/>结果是否正确？<br/>token 消耗多少？]
-    C --> D[识别 anti-pattern：<br/>应该用 codegraph 却用 grep]
+    C --> D[识别 anti-pattern：<br/>"应该用 codegraph 却用 grep"]
     D --> E[修改 RULE.mdc 中相应规则]
     E --> F[重测 + 对比]
     F -->|改善| G[发布]
