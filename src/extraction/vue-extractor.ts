@@ -168,6 +168,7 @@ export class VueExtractor {
         source: componentNodeId,
         target: node.id,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
     }
 

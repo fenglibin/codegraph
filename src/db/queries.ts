@@ -180,6 +180,7 @@ export class QueryBuilder {
     getUnresolvedBatch?: SqliteStatement;
     getAllFilePaths?: SqliteStatement;
     getAllNodeNames?: SqliteStatement;
+    getMaxIndexedAt?: SqliteStatement;
   } = {};
 
   constructor(db: SqliteDatabase) {
@@ -1146,6 +1147,31 @@ export class QueryBuilder {
       const currentHash = currentHashes.get(f.path);
       return currentHash && currentHash !== f.contentHash;
     });
+  }
+
+  /**
+   * Most recent `indexed_at` timestamp across all tracked files (epoch ms),
+   * or `null` when nothing is indexed yet. Used by the MCP layer to surface
+   * index freshness — see P0/T3 — so LLMs can detect stale graphs after a
+   * watcher failure or a long-idle project.
+   *
+   * Implemented as a single SQL aggregate so the cost is O(log n) on the
+   * `idx_files_modified_at` index region rather than O(n) JS-side max.
+   * We don't add a dedicated index on `indexed_at` because (a) `MAX(col)`
+   * over a tiny `files` table (typically <50k rows) is microsecond-cheap
+   * even via full scan, and (b) every `upsertFile` would pay a write cost
+   * for an index that's only consulted on every MCP tool call.
+   */
+  getMaxIndexedAt(): number | null {
+    if (!this.stmts.getMaxIndexedAt) {
+      this.stmts.getMaxIndexedAt = this.db.prepare(
+        'SELECT MAX(indexed_at) AS maxIndexedAt FROM files'
+      );
+    }
+    const row = this.stmts.getMaxIndexedAt.get() as
+      | { maxIndexedAt: number | null }
+      | undefined;
+    return row?.maxIndexedAt ?? null;
   }
 
   // ===========================================================================

@@ -189,6 +189,7 @@ export class SvelteExtractor {
         source: componentNodeId,
         target: node.id,
         kind: 'contains',
+        provenance: 'tree-sitter',
       });
     }
 

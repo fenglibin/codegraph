@@ -535,6 +535,11 @@ export class ReferenceResolver {
           confidence: ref.confidence,
           resolvedBy: ref.resolvedBy,
         },
+        // Edges produced by the reference resolver are heuristic by
+        // construction — name matching, fuzzy matching, instance-method
+        // inference. AST-direct edges (contains/imports/extends) come
+        // from the extraction layer and are stamped 'tree-sitter' there.
+        provenance: 'heuristic',
       };
     });
   }
