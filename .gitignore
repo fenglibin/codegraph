@@ -12,6 +12,7 @@ dist/
 *.swp
 *.swo
 *~
+.codebuddy
 
 # OS
 .DS_Store
@@ -50,3 +51,7 @@ test-languages/
 
 nul
 release/
+
+openspec/*
+AGENTS.md
+CODEBUDDY.md

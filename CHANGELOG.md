@@ -7,6 +7,26 @@ a [GitHub Release](https://github.com/colbymchenry/codegraph/releases) tagged
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **CodeBuddy IDE support**: `codegraph install --target=codebuddy` now
+  configures Tencent CodeBuddy IDE alongside the existing four agents.
+  Writes MCP server entry to `~/.codebuddy/mcp.json` (global) or
+  `<workspace>/.mcp.json` (local, supported since CodeBuddy v4.0.0)
+  using the same `{"mcpServers": {...}}` shape Claude / Cursor use.
+  Writes agent instructions to `~/.codebuddy/rules/codegraph/RULE.mdc`
+  with `.mdc` frontmatter `alwaysApply: true` so the rule auto-loads
+  into every CodeBuddy session, or to `<workspace>/CODEBUDDY.md` as a
+  marker-delimited section. When a project has no `CODEBUDDY.md` but
+  does ship an `AGENTS.md`, the marker block is written into
+  `AGENTS.md` instead — honoring CodeBuddy's documented compat path.
+  `--target=auto` picks up CodeBuddy when `~/.codebuddy/` (global) or
+  `<workspace>/.codebuddy/` / `.mcp.json` / `CODEBUDDY.md` (local) is
+  present. `codegraph init` now also wires the project-level
+  `CODEBUDDY.md` for users who configured CodeBuddy globally —
+  mirroring the existing Cursor flow.
+
 ## [0.9.2] - 2026-05-21
 
 ### Added
