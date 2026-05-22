@@ -7,6 +7,48 @@ a [GitHub Release](https://github.com/colbymchenry/codegraph/releases) tagged
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.10.1] - 2026-05-22
+
+### Added
+- **LLM trust signals** — Every relationship edge now carries a `provenance`
+  tag (`tree-sitter` / `heuristic` / `scip`) and a numeric `confidence` score,
+  surfaced in all 9 MCP tool responses:
+  - Tool output now includes a provenance tag and confidence per symbol
+    (e.g. `[tree-sitter, conf:0.95]` vs `[heuristic, conf:0.6 ⚠️]`)
+  - Edges with confidence < 0.7 get a low-confidence ⚠️ warning
+  - Every tool response (except `codegraph_status`) now includes an index-age
+    footer — `Index updated N minutes ago`, upgrading to `⚠️ Index updated
+    N minutes ago — consider re-running 'codegraph sync'` when stale (>30 min)
+  - JSON context output (`serializeEdge`) also includes provenance/confidence
+  - `initialize` response now includes watcher health diagnostics — if the
+    file watcher is down, the LLM gets warned immediately instead of silently
+    working from stale data
+  - **Bilingual mandatory rules**: `SERVER_INSTRUCTIONS` and all 5 installer
+    targets now include 5 English `**NEVER**` rules AND 5 Chinese `**绝不**`
+    rules, so non-English models (DeepSeek, Qwen, GLM, etc.) also respect
+    codegraph's trust signals
+
+- **CodeBuddy IDE support**: `codegraph install --target=codebuddy` now
+  configures Tencent CodeBuddy IDE alongside the existing four agents.
+  Writes MCP server entry to `~/.codebuddy/mcp.json` (global) or
+  `<workspace>/.mcp.json` (local, supported since CodeBuddy v4.0.0)
+  using the same `{"mcpServers": {...}}` shape Claude / Cursor use.
+  Writes agent instructions to `~/.codebuddy/rules/codegraph/RULE.mdc`
+  with `.mdc` frontmatter `alwaysApply: true`, or to
+  `<workspace>/CODEBUDDY.md` as a marker-delimited section (with
+  `AGENTS.md` fallback). `--target=auto` picks up CodeBuddy when
+  `~/.codebuddy/` or `.codebuddy/` is present. `codegraph init` now
+  also wires the project-level `CODEBUDDY.md`.
+
+### Fixed
+- **Watcher test harness**: `waitFor` helper now accepts an optional
+  `AbortSignal` to stop recursive `setTimeout` chains on test teardown,
+  eliminating a spurious `database is not open` unhandled error. Five
+  fs.watch integration tests remain inherently flaky on macOS (kqueue
+  limitation) and are documented as known noise.
+
 ## [0.9.2] - 2026-05-21
 
 ### Added

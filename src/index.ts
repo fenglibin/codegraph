@@ -6,6 +6,7 @@
  */
 
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import {
   Node,
   Edge,
