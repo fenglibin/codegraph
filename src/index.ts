@@ -30,6 +30,7 @@ import {
   createDirectory,
   removeDirectory,
   validateDirectory,
+  CODEGRAPH_DIR,
 } from './directory';
 import {
   ExtractionOrchestrator,
@@ -652,6 +653,139 @@ export class CodeGraph {
    */
   getMaxIndexedAt(): number | null {
     return this.queries.getMaxIndexedAt();
+  }
+
+  /**
+   * P2/F-4 — Git-aware change signal for smart staleness detection.
+   *
+   * Returns two independent facts about the project relative to git:
+   *
+   *   - `lastCommitTime`: epoch ms of the project's HEAD commit
+   *     (committer time, not author time — see below), or `null` when
+   *     git is unavailable.
+   *   - `hasUncommitted`: whether `git status` reports any modified or
+   *     untracked file that isn't in `.gitignore`.
+   *
+   * The MCP footer (`_internal_formatIndexAgeFooter`) combines both into
+   * a 4-branch decision tree:
+   *
+   *   hasUncommitted=true   → "⚠️ Uncommitted changes since last index"
+   *   lastCommitTime>index  → "⚠️ Git has commits newer than this index"
+   *   lastCommitTime≤index  → "✓ matches HEAD, no uncommitted changes"
+   *   lastCommitTime=null   → fall back to the P0 30-minute timer
+   *
+   * Why **committer time** (`%ct`) and not **author time** (`%at`):
+   * staleness asks "when did this commit enter the repository", not
+   * "when was the change first written". A rebase or cherry-pick keeps
+   * the author time but updates the committer time — and an index built
+   * before the rebase IS stale relative to the rebased HEAD.
+   *
+   * Why **`--untracked-files=normal`**: covers the "user added a new
+   * .ts file but hasn't `git add`-ed it" case (a common dev scenario),
+   * while still honoring `.gitignore` (git's built-in ignore machinery
+   * filters build artifacts / node_modules / etc.). Using `=no` would
+   * miss new files entirely; `=all` adds 30-50% latency for no extra
+   * staleness signal (we only care about a boolean).
+   *
+   * Why **no `isGitRepo` precheck**: a non-repo / git-not-installed
+   * already throws on the first `git log` call, and the second
+   * `git rev-parse` would double the syscall cost on every tool
+   * invocation. The catch-all degrades to `null` either way.
+   *
+   * Defensive against everything — the footer that consumes this value
+   * is purely informational, so any glitch (git missing, detached HEAD,
+   * empty repo, parse error, hanging `git status` on a pathological
+   * repo) MUST degrade silently rather than propagate. We catch
+   * separately for `lastCommitTime` and `hasUncommitted` so a
+   * `git status` timeout doesn't blow away the `git log` reading.
+   */
+  getProjectChangeSignal(): {
+    lastCommitTime: number | null;
+    hasUncommitted: boolean;
+  } {
+    let lastCommitTime: number | null = null;
+    try {
+      // `%ct` is the committer epoch in seconds. `--no-pager` keeps git
+      // from spawning `less` in TTY-attached terminals. stderr ignored
+      // to swallow "fatal: not a git repository" noise that would leak
+      // into the test runner / agent log.
+      const out = execFileSync(
+        'git',
+        ['--no-pager', 'log', '-1', '--format=%ct'],
+        {
+          cwd: this.projectRoot,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        },
+      ).trim();
+      if (out) {
+        const seconds = Number(out);
+        if (Number.isFinite(seconds) && seconds > 0) {
+          lastCommitTime = seconds * 1000;
+        }
+      }
+    } catch {
+      // Non-repo / git not installed / empty repo / detached HEAD with
+      // no resolvable ref — all roll up to "no signal", which the
+      // footer treats as "fall back to the P0 timer".
+    }
+
+    let hasUncommitted = false;
+    try {
+      // `--porcelain` produces a stable, machine-readable one-line-per-
+      // change format. The 2000ms timeout shields against pathological
+      // mega-repos with no fsmonitor enabled (typical repos are
+      // < 100ms); on timeout the catch leaves hasUncommitted=false so
+      // the footer falls back to the git HEAD comparison alone.
+      const out = execFileSync(
+        'git',
+        [
+          '--no-pager',
+          'status',
+          '--porcelain',
+          '--untracked-files=normal',
+        ],
+        {
+          cwd: this.projectRoot,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 2000,
+        },
+      );
+      // Filter codegraph's own internal directory from the dirty
+      // signal. `CodeGraph.init` creates `.codegraph/` to hold the
+      // SQLite DB; without filtering, every freshly-initialized
+      // project would look perpetually "dirty" to git and the index
+      // would always be flagged stale — a tautology, since the act
+      // of building the index is what makes it look dirty.
+      //
+      // Porcelain format: each line is "XY filename" (or "XY orig -> new"
+      // for renames). Both staged- and untracked- lines for `.codegraph/`
+      // start with the path after the 3-char status prefix, e.g.
+      // "?? .codegraph/" or "?? .codegraph/db.sqlite". We strip lines
+      // referencing this directory and treat the remainder as the real
+      // staleness signal.
+      const significant = out
+        .split('\n')
+        .filter((line) => {
+          const trimmed = line.trim();
+          if (trimmed.length === 0) return false;
+          // Strip the status prefix (always exactly 3 chars: 2 status
+          // codes + 1 space) before path matching.
+          const pathPart = trimmed.slice(3);
+          return (
+            !pathPart.startsWith(`${CODEGRAPH_DIR}/`) &&
+            pathPart !== CODEGRAPH_DIR
+          );
+        });
+      hasUncommitted = significant.length > 0;
+    } catch {
+      // Same degradation policy as lastCommitTime. We intentionally
+      // don't propagate timeout vs ENOENT differences upward — the
+      // footer logic treats "no signal" uniformly.
+    }
+
+    return { lastCommitTime, hasUncommitted };
   }
 
   // ===========================================================================

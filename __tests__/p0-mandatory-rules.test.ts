@@ -69,14 +69,6 @@ describe('P0/T5 — Mandatory Rules section in SERVER_INSTRUCTIONS', () => {
       );
     });
 
-    it('rule 5 names the index-age stale threshold (30 minutes)', () => {
-      // Note the literal "30 minutes" must match the
-      // INDEX_AGE_STALE_MS constant in src/mcp/tools.ts (T3). If that
-      // constant changes, both this rule text and the matching test
-      // below should change in lockstep.
-      expect(SERVER_INSTRUCTIONS).toMatch(/30 minutes/);
-    });
-
     it('drift guard: rule 4 confidence threshold matches _internal_CONFIDENCE_LOW_THRESHOLD in tools.ts', async () => {
       // Cross-module consistency check. The Mandatory Rules text and
       // the runtime threshold must agree, or the LLM gets one rule
@@ -92,23 +84,36 @@ describe('P0/T5 — Mandatory Rules section in SERVER_INSTRUCTIONS', () => {
       );
     });
 
-    it('drift guard: rule 5 stale-index threshold matches _internal_INDEX_AGE_STALE_MS in tools.ts', async () => {
-      // P1/F4 — closes the backlog item from T5. The literal "30
-      // minutes" / "30 分钟" in both English and Chinese mandatory
-      // rules must equal `_internal_INDEX_AGE_STALE_MS / 60_000`. If
-      // someone changes the constant to 15min or 60min, this test
-      // fails and forces both rule texts to update in lockstep.
+    it('rule 5 names all three stale-signal footer literals (P2/F-4 — git-aware staleness)', () => {
+      // P2/F-4 upgraded rule 5 from a single 30-minute timer-based
+      // signal to three footer variants: uncommitted, git-newer,
+      // timer-stale. The LLM must be able to grep any of them in the
+      // response footer and react. We assert all three literals appear
+      // verbatim so the agent's "see footer → run codegraph sync"
+      // reflex is precisely armed.
+      expect(SERVER_INSTRUCTIONS).toContain(
+        '⚠️ Uncommitted changes (modified or new files outside .gitignore)',
+      );
+      expect(SERVER_INSTRUCTIONS).toContain(
+        '⚠️ Git has commits newer than this index',
+      );
+      expect(SERVER_INSTRUCTIONS).toContain(
+        '⚠️ Index age: ... older than 30m ... stale',
+      );
+    });
+
+    it('drift guard: rule 5 stale-index threshold (30m) appears in the timer-stale literal (P2/F-4 lockstep with _internal_INDEX_AGE_STALE_MS)', async () => {
+      // P2/F-4 — the older "30 minutes" prose was replaced by the
+      // exact footer literal "older than 30m". The drift guard now
+      // asserts the literal embeds the configured threshold so
+      // changing _internal_INDEX_AGE_STALE_MS without updating
+      // SERVER_INSTRUCTIONS still fails.
       const { _internal_INDEX_AGE_STALE_MINUTES } = await import(
         '../src/mcp/tools'
       );
       expect(_internal_INDEX_AGE_STALE_MINUTES).toBe(30);
-      // English rule: "Index age: older than 30m" + "30 minutes"
       expect(SERVER_INSTRUCTIONS).toContain(
-        `${_internal_INDEX_AGE_STALE_MINUTES} minutes`
-      );
-      // Chinese rule: "30 分钟"
-      expect(SERVER_INSTRUCTIONS).toContain(
-        `${_internal_INDEX_AGE_STALE_MINUTES} 分钟`
+        `older than ${_internal_INDEX_AGE_STALE_MINUTES}m`,
       );
     });
   });
@@ -126,17 +131,31 @@ describe('P0/T5 — Mandatory Rules section in SERVER_INSTRUCTIONS', () => {
       );
     });
 
-    it('Chinese rule 5 names the same 30-minute stale threshold (parity with English rule 5)', () => {
-      expect(SERVER_INSTRUCTIONS).toMatch(/30 分钟/);
+    it('Chinese rule 5 names all three stale-signal footer literals (parity with English, P2/F-4)', () => {
+      // The Chinese rule body uses the same English footer literals
+      // verbatim — LLM-facing footer text is English-only by design
+      // so cross-language model groups (Qwen / GLM / DeepSeek) all
+      // pattern-match against the same anchor strings.
+      expect(SERVER_INSTRUCTIONS).toContain(
+        '⚠️ Uncommitted changes (modified or new files outside .gitignore)',
+      );
+      expect(SERVER_INSTRUCTIONS).toContain(
+        '⚠️ Git has commits newer than this index',
+      );
+      expect(SERVER_INSTRUCTIONS).toContain(
+        '⚠️ Index age: ... older than 30m ... stale',
+      );
     });
   });
 
   describe('budget and completeness', () => {
-    it('boundary: total SERVER_INSTRUCTIONS length stays ≤ 6000 chars (token-budget guard against unchecked growth)', () => {
-      // Anchor the upper bound. Current size is roughly 4500-5500 chars
-      // after T5; 6000 leaves headroom for typo fixes / one more rule
-      // before the suite forces a re-evaluation of the token budget.
-      expect(SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(6000);
+    it('boundary: total SERVER_INSTRUCTIONS length stays ≤ 6500 chars (token-budget guard against unchecked growth)', () => {
+      // P2/F-4 expanded rule 5 from ~200 chars (single timer signal)
+      // to ~700 chars (three footer literals + bilingual + the
+      // ✓-matches-HEAD positive-trust mention). Bumped the cap from
+      // 6000 → 6500 to leave the same ~500-char headroom for one more
+      // rule before the suite forces another re-evaluation.
+      expect(SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(6500);
     });
 
     it('boundary: total length ≥ 3000 chars (regression guard against accidental hollowing)', () => {

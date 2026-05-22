@@ -136,16 +136,51 @@ export const _internal_INDEX_AGE_STALE_MINUTES =
 const TOOLS_SKIP_INDEX_AGE = new Set<string>(['codegraph_status']);
 
 /**
+ * Change-signal payload accepted by {@link _internal_formatIndexAgeFooter} —
+ * the git-aware staleness signal added in P2/F-4. Matches the shape of
+ * `CodeGraph.getProjectChangeSignal()` so callers can pass it through
+ * unchanged.
+ *
+ * Exported as `_internal_*` for unit tests; not part of the public MCP API.
+ */
+export interface _internal_ChangeSignal {
+  /** Epoch ms of the project's HEAD commit, or `null` when git is unavailable. */
+  lastCommitTime: number | null;
+  /** Whether `git status --porcelain --untracked-files=normal` is non-empty. */
+  hasUncommitted: boolean;
+}
+
+/**
  * Format a single epoch-ms timestamp as the human-friendly age footer
  * we append to MCP tool output. Returns '' when no timestamp is
  * available (e.g. empty index) so callers can concatenate freely.
+ *
+ * P2/F-4: when `changeSignal` is provided, the footer uses git as the
+ * staleness oracle instead of (or alongside) the P0 30-minute timer.
+ * Decision priority (highest first):
+ *
+ *   1. `hasUncommitted === true` → "⚠️ Uncommitted changes" warning.
+ *      Strongest signal: the user is actively editing.
+ *   2. `lastCommitTime > maxIndexedAt` → "⚠️ Git has commits newer
+ *      than this index" warning. The committed code has moved.
+ *   3. `lastCommitTime ≤ maxIndexedAt` → "✓ matches HEAD, no
+ *      uncommitted changes" double-verification footer (the highest
+ *      trust signal we emit).
+ *   4. `lastCommitTime === null` (git not available) → fall back to
+ *      the P0/T3 30-minute blind timer. Behavior is BYTE-identical to
+ *      P0 in this branch so existing tests pass unchanged.
+ *
+ * When `changeSignal` is omitted entirely (default `null`), the
+ * function is byte-compatible with P0/T3 — existing 2-arg callers and
+ * the 9 P0/T3 unit tests continue to work as-is.
  *
  * Exported as `_internal_formatIndexAgeFooter` for unit testing —
  * `now` is injected so tests don't depend on the wall clock.
  */
 export function _internal_formatIndexAgeFooter(
   maxIndexedAt: number | null,
-  now: number = Date.now()
+  now: number = Date.now(),
+  changeSignal: _internal_ChangeSignal | null = null,
 ): string {
   if (maxIndexedAt === null || maxIndexedAt <= 0) return '';
   const ageMs = Math.max(0, now - maxIndexedAt);
@@ -161,6 +196,48 @@ export function _internal_formatIndexAgeFooter(
   } else {
     ageLabel = `${(ageMs / 3_600_000).toFixed(1)}h`;
   }
+
+  // F-4 git-aware branches. Only engage when caller passed a change
+  // signal AND we have at least one meaningful git fact. If `lastCommitTime`
+  // is null AND `hasUncommitted` is false, the signal is empty — drop
+  // through to the P0 timer path so we don't downgrade a previously
+  // fresh-looking response into a "no signal" footer.
+  const hasGitSignal =
+    changeSignal !== null &&
+    (changeSignal.lastCommitTime !== null || changeSignal.hasUncommitted);
+
+  if (hasGitSignal) {
+    // Priority 1: uncommitted changes — strongest signal. The user
+    // mentioned modified or new (non-gitignored) files between the
+    // last index and now; treat as stale regardless of HEAD timing.
+    if (changeSignal.hasUncommitted) {
+      return (
+        `\n\n_⚠️ Uncommitted changes (modified or new files outside .gitignore) ` +
+        `since last index — run \`codegraph sync\` before relying on results._`
+      );
+    }
+    // Priority 2: HEAD moved past the index. We know `hasUncommitted`
+    // is false here, so the only stale signal is "newer commits exist".
+    if (
+      changeSignal.lastCommitTime !== null &&
+      changeSignal.lastCommitTime > maxIndexedAt
+    ) {
+      return (
+        `\n\n_⚠️ Git has commits newer than this index — run ` +
+        `\`codegraph sync\` before relying on results._`
+      );
+    }
+    // Priority 3: HEAD time is known and not newer, no uncommitted —
+    // emit the high-trust double-verification footer.
+    if (changeSignal.lastCommitTime !== null) {
+      return `\n\n_Index age: ${ageLabel} ago (✓ matches HEAD, no uncommitted changes)_`;
+    }
+    // Fall-through: only `hasUncommitted=false` and `lastCommitTime=null`
+    // would reach here, but that's caught by `hasGitSignal` above. No-op.
+  }
+
+  // P0/T3 fallback path — byte-compatible with pre-F-4 behavior so the
+  // existing 9 P0/T3 unit tests continue to pass unchanged.
   if (ageMs >= INDEX_AGE_STALE_MS) {
     return (
       `\n\n_⚠️ Index age: ${ageLabel} ago — older than 30m, results may be ` +
@@ -790,7 +867,24 @@ export class ToolHandler {
     try {
       const cg = this.tryGetCodeGraph(args.projectPath as string | undefined);
       if (cg) {
-        const footer = formatIndexAgeFooter(cg.getMaxIndexedAt());
+        // P2/F-4: pass the git-aware change signal alongside the raw
+        // index timestamp. The footer formatter prefers git facts when
+        // available and falls back to the P0/T3 30-minute timer when
+        // git is unavailable (non-repo, git not installed, timeout).
+        // Wrapped in its own try so a future regression in
+        // getProjectChangeSignal can never break the footer it feeds.
+        let changeSignal: _internal_ChangeSignal | null = null;
+        try {
+          changeSignal = cg.getProjectChangeSignal();
+        } catch {
+          // Same degradation policy as the inner try in
+          // getProjectChangeSignal — footer is informational.
+        }
+        const footer = formatIndexAgeFooter(
+          cg.getMaxIndexedAt(),
+          Date.now(),
+          changeSignal,
+        );
         if (footer && result.content.length > 0) {
           const last = result.content[result.content.length - 1]!;
           if (last.type === 'text') {

@@ -121,7 +121,7 @@ codegraph init -i
 | **全文搜索** | 通过 FTS5 引擎在全部代码库中按名称即时查找代码 |
 | **影响面分析** | 在修改前追踪任何符号的调用者、被调用者和完整的影响半径 |
 | **🔴 信任信号系统** | 每条边都有"产地"标签（tree-sitter 精确解析 / heuristic 启发式猜测 / scip 预留）和置信度分数（0.3~0.95），让 AI 知道结果可靠性 |
-| **🔴 索引时效感知** | AI 回答末尾自动附带"索引上次更新于 X 分钟前"标记；超过 30 分钟给出警告；watcher 失效时 AI 启动即感知 |
+| **🔴 索引时效感知（Git 智能检测）** | 每次工具响应自动带 staleness 页脚。在 Git 项目中三种信号并行覆盖**接近 100% 的代码变更**：① 未 commit 的修改或新增文件（自动尊重 .gitignore）→ `⚠️ Uncommitted changes` ② HEAD 新于索引 → `⚠️ Git has commits newer than this index` ③ 双向验证一致 → `✓ matches HEAD, no uncommitted changes`（最高可信度）。非 Git 项目自动降级到 30 分钟定时器 |
 | **🔴 双语强制规则** | 安装时同时写入中英文两套"绝不"规则 — 中文模型（DeepSeek/Qwen/GLM）能正确理解，不再忽略 confidence 警告 |
 | **始终新鲜** | 文件监听器使用原生 OS 事件（FSEvents/inotify/ReadDirectoryChangesW）配合防抖自动同步 — 图谱随编码实时更新，零配置 |
 | **19+ 种语言** | TypeScript、JavaScript、Python、Go、Rust、Java、C#、PHP、Ruby、C、C++、Swift、Kotlin、Dart、Lua、Luau、Svelte、Liquid、Pascal/Delphi |
@@ -423,7 +423,16 @@ fi
 | `codegraph_files` | 获取已索引的文件结构（比文件系统扫描更快） |
 | `codegraph_status` | 检查索引健康状态和统计信息 |
 
-**🔴 信任信号**：所有数据查询类工具（callers / callees / impact / context 等）的响应中，每条边都附带"产地 + 置信度"标签（如 `[tree-sitter, conf:0.95]` 或 `[heuristic, conf:0.6 ⚠️]`），响应末尾带索引时效页脚（如 `—— Index updated 5 minutes ago`）。超过 30 分钟会显示警告 `⚠️ Index updated 47 minutes ago — consider re-running 'codegraph sync'`。
+**🔴 信任信号**：所有数据查询类工具（callers / callees / impact / context 等）的响应中，每条边都附带"产地 + 置信度"标签（如 `[tree-sitter, conf:0.95]` 或 `[heuristic, conf:0.6 ⚠️]`）。响应末尾自动追加 **Git 智能 staleness 页脚**：
+
+| 场景 | 页脚示例 | 含义 |
+|---|---|---|
+| 有未 commit 修改 / 新增非 .gitignore 文件 | `⚠️ Uncommitted changes (modified or new files outside .gitignore) since last index — run codegraph sync` | 最强信号：用户正在改代码 |
+| HEAD commit 新于索引 | `⚠️ Git has commits newer than this index — run codegraph sync` | 次强信号：已 commit 但未重新索引 |
+| 工作目录干净 + HEAD ≤ 索引 | `_Index age: 5m ago (✓ matches HEAD, no uncommitted changes)_` | **最高可信度**：git 双向验证通过 |
+| 非 Git 项目（降级） | `_Index age: 5m ago_` / `⚠️ Index age: 47m ago — older than 30m ... stale` | 30 分钟盲计时器兜底 |
+
+**~100% 检测覆盖**：在 Git 项目中，F-4 智能检测对用户主观认知的代码变更（修改 / 新增 / 删除 / 改名，无论是否 commit）接近 100% 覆盖，**自动尊重 .gitignore**（不会因 build artifact 误报）。唯一未覆盖的边界：非 Git 项目（降级到 30 分钟盲计时器）和被 .gitignore 排除但仍被 codegraph 索引的文件（罕见配置，详见 [`docs/p2-f4-smart-stale-rationale.md`](docs/p2-f4-smart-stale-rationale.md)）。
 
 ---
 

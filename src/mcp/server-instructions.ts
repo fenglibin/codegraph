@@ -56,10 +56,20 @@ and cheaper. Do not.
    Edges tagged \`[heur 0.NN ⚠️]\` come from heuristic name matching, not
    AST analysis. Open the call site (codegraph_node / Read the line) to
    confirm before relying on the relationship.
-5. **NEVER answer when the response carries \`⚠️ Index age:\` older than
-   30 minutes.** Ask the user to run \`codegraph sync\` first, or call
-   \`codegraph_status\` to confirm the watcher's state. Stale graphs
-   produce confidently-wrong answers.
+5. **NEVER answer when the response footer carries any of these stale
+   signals**:
+   - \`⚠️ Uncommitted changes (modified or new files outside .gitignore)\`
+   - \`⚠️ Git has commits newer than this index\`
+   - \`⚠️ Index age: ... older than 30m ... stale\`
+
+   All three mean the graph predates current code. Run \`codegraph sync\`
+   first (or ask the user to), or call \`codegraph_status\` to confirm
+   the watcher's state. The two git-derived signals are stronger than
+   the time-based one: they're git's own verdict that code changed
+   since the index was built. Conversely, a footer ending in
+   \`(✓ matches HEAD, no uncommitted changes)\` is the highest-trust
+   signal we emit — git has confirmed the index reflects the current
+   working tree.
 
 以下规则为**强制要求**，不是建议。未经 codegraph 微调的模型（DeepSeek、
 Qwen、GLM 等）常因训练习惯而退回 grep / Read，即使 codegraph 更快更省。
@@ -76,9 +86,16 @@ Qwen、GLM 等）常因训练习惯而退回 grep / Read，即使 codegraph 更�
 4. **绝不**信任置信度 < 0.7 的关系边。被标 \`[heur 0.NN ⚠️]\` 的边来自启发
    式名字匹配，不是 AST 分析；先用 \`codegraph_node\` 或 Read 该行确认调用
    关系，再做出依赖性判断。
-5. **绝不**在响应底部出现 \`⚠️ Index age:\` 且超过 30 分钟时直接回答。先让
-   用户执行 \`codegraph sync\`，或用 \`codegraph_status\` 确认 watcher 状态。
-   过期索引会让你给出"自信但错误"的答案。
+5. **绝不**在响应底部出现以下任一过期信号时直接回答：
+   - \`⚠️ Uncommitted changes (modified or new files outside .gitignore)\`
+   - \`⚠️ Git has commits newer than this index\`
+   - \`⚠️ Index age: ... older than 30m ... stale\`
+
+   这三种都说明索引落后于当前代码。先让用户执行 \`codegraph sync\`，
+   或用 \`codegraph_status\` 确认 watcher 状态。两种基于 git 的信号比
+   定时器信号更强：它们是 git 自己验证过"代码自索引后已变更"。反之，
+   底部出现 \`(✓ matches HEAD, no uncommitted changes)\` 是我们能输出
+   的最高可信度信号 —— git 已确认索引匹配当前工作目录。
 
 ## Answer directly — don't delegate exploration
 
