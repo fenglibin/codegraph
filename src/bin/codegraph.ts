@@ -18,6 +18,13 @@
  *   codegraph affected [files]   Find test files affected by changes
  */
 
+// !!! MUST run before any other require() — V8 heap must be resized
+//     before tree-sitter WASM compilation triggers Turboshaft OOM.
+//     --max-old-space-size=4096 gives V8 enough room for the
+//     Zone allocator that Turboshaft uses during WASM lowering.
+const v8 = require('v8');
+v8.setFlagsFromString('--max-old-space-size=4096');
+
 import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';

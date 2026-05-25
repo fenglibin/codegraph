@@ -45,8 +45,12 @@ const PARSE_TIMEOUT_MS = 10_000;
  * The only way to reclaim tree-sitter's WASM heap is to destroy the entire
  * V8 isolate by terminating the worker thread and spawning a fresh one.
  * This interval balances memory usage against the cost of reloading grammars.
+ *
+ * Set to 50 so that even on memory-constrained machines (~4 GB available)
+ * the WASM heap does not grow large enough to trigger a Zone OOM
+ * during V8's Turboshaft WASM compilation.
  */
-const WORKER_RECYCLE_INTERVAL = 250;
+const WORKER_RECYCLE_INTERVAL = 50;
 
 /**
  * Progress callback for indexing operations

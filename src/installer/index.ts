@@ -76,6 +76,37 @@ export interface RunInstallerOptions {
   yes?: boolean;
 }
 
+/** Target IDs that support auto-allow (permission allow-lists). */
+const AUTO_ALLOW_IDS = ['claude', 'codex'] as const;
+
+/**
+ * Pure helper — decide whether the installer should prompt the user
+ * about auto-allowing CodeGraph commands.
+ *
+ * Returns `true` ONLY when:
+ *  - `opts.autoAllow` is not pre-set (caller didn't force a value)
+ *  - `useDefaults` is false (we are in interactive mode)
+ *  - Exactly ONE target was chosen AND that target is Claude Code
+ *
+ * This prevents the Claude-only prompt from appearing when the user
+ * selects multiple targets (e.g. Claude + CodeBuddy), because
+ * the auto-allow setting is only meaningful for Claude.
+ */
+export function shouldAskAutoAllow(
+  targets: AgentTarget[],
+  useDefaults: boolean,
+  opts: RunInstallerOptions,
+): boolean {
+  if (opts.autoAllow !== undefined) return false;
+  if (useDefaults) return false;
+  // Only ask when exactly one target is selected AND it is Claude.
+  // (Codex supports auto-allow but we don't prompt for it —
+  //  the user can set it manually if needed.)
+  const hasClaudeOnly =
+    targets.length === 1 && targets[0]!.id === 'claude';
+  return hasClaudeOnly;
+}
+
 /**
  * Interactive entry point — preserves the historical UX (`codegraph
  * install` with no args goes through the prompts), but now starts
@@ -161,16 +192,24 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     }
   }
 
-  // Step 4: auto-allow permissions (only meaningful for Claude;
-  // skipped silently by other targets).
+  // Step 4: auto-allow permissions (only meaningful for agents that
+  // support permission allow-lists; skipped silently for others).
   let autoAllow: boolean;
   if (opts.autoAllow !== undefined) {
     autoAllow = opts.autoAllow;
   } else if (useDefaults) {
     autoAllow = true;
-  } else if (targets.some((t) => t.id === 'claude')) {
+  } else if (shouldAskAutoAllow(targets, useDefaults, opts)) {
+    // Build a human-readable list of ONLY auto-allow-supported target names.
+    const autoAllowTargets = targets.filter(
+      (t) => (AUTO_ALLOW_IDS as readonly string[]).includes(t.id),
+    );
+    const names = autoAllowTargets.map((t) => t.displayName);
+    const message = names.length === 1
+      ? `Auto-allow CodeGraph commands for ${names[0]}?`
+      : `Auto-allow CodeGraph commands for ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}?`;
     const ans = await clack.confirm({
-      message: 'Auto-allow CodeGraph commands? (Skips permission prompts in Claude Code)',
+      message,
       initialValue: true,
     });
     if (clack.isCancel(ans)) {
@@ -277,12 +316,11 @@ async function resolveTargets(
 
   // Interactive multi-select.
   const detected = detectAll(location);
-  const initialValues = detected
-    .filter(({ detection }) => detection.installed)
-    .map(({ target }) => target.id);
-  // If nothing detected, default to Claude alone (matches the
-  // historical default and the smallest-surprise outcome).
-  const initial = initialValues.length > 0 ? initialValues : ['claude'];
+  // No default selection — let the user decide explicitly.
+  // This avoids surprising the user by silently enabling targets
+  // they did not ask for (e.g. CodeBuddy, which does not
+  // support auto-allow).
+  const initial: string[] = [];
 
   const choice = await clack.multiselect<string>({
     message: 'Which agents should CodeGraph configure?',
@@ -302,6 +340,14 @@ async function resolveTargets(
   if (clack.isCancel(choice)) {
     clack.cancel('Installation cancelled.');
     process.exit(0);
+  }
+
+  // Prevent proceeding with zero selections – the caller expects at
+  // least one target to configure.
+  if (choice.length === 0) {
+    clack.log.error('Please select at least one agent.');
+    // Recurse so the user can choose again.
+    return resolveTargets(clack, opts, location, useDefaults);
   }
 
   return choice

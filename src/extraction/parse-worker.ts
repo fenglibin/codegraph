@@ -52,7 +52,7 @@ import type { Language, ExtractionResult } from '../types';
   }) as typeof process.stderr.write;
 }
 
-const PARSER_RESET_INTERVAL = 5000;
+const PARSER_RESET_INTERVAL = 500;
 const parseCounts = new Map<Language, number>();
 
 parentPort!.on('message', async (msg: { type: string; id?: number; filePath?: string; content?: string; languages?: Language[]; frameworkNames?: string[] }) => {
