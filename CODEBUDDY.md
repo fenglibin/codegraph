@@ -74,7 +74,7 @@ grep 无法提供的结构化信息。
 ### 🚫 强制规则 —— 必须遵守
 
 以下是**强制规则**，不是建议。未经 codegraph 微调的模型（DeepSeek、Qwen、
-GLM 等）常因训练习惯而退回 grep / Read，即使 codegraph 更快。请严格遵守：
+GLM、HunYuan 等）常因训练习惯而退回 grep / Read，即使 codegraph 更快。请严格遵守：
 
 1. **绝不**用 grep / find / Read 按名查找符号。优先调用 `codegraph_search` 或 `codegraph_context`。
 2. **绝不**用 Read + grep 串联来追踪 X 是怎么工作的。一次 `codegraph_context` 加一次 `codegraph_explore` 即可。
@@ -87,6 +87,18 @@ GLM 等）常因训练习惯而退回 grep / Read，即使 codegraph 更快。�
 涉及**结构性**问题（谁调用谁、改了会破坏什么、X 在哪定义、X 的签名是什么）
 请用 codegraph；只在查询**字面文本**（字符串内容、注释、日志消息）或已经
 打开了具体文件时，才使用原生 grep/read。
+
+| 问题 | 工具 |
+|---|---|
+| "X 在哪定义？" / "找名字叫 X 的符号" | `codegraph_search` |
+| "谁调用了函数 Y？" | `codegraph_callers` |
+| "Y 调用了哪些东西？" | `codegraph_callees` |
+| "改 Z 会影响哪些地方？" | `codegraph_impact` |
+| "看 Y 的签名 / 源码 / docstring" | `codegraph_node` |
+| "针对某个任务/区域给我聚焦的上下文" | `codegraph_context` |
+| "一次性看几个相关符号的源码" | `codegraph_explore` |
+| "path/ 下有哪些文件" | `codegraph_files` |
+| "索引是否健康？" | `codegraph_status` |
 
 ### 经验法则
 
