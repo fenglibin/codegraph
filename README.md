@@ -46,7 +46,7 @@ codegraph init -i
 
 <div align="center">
 
-![1_C_VYnhpys0UHrOuOgpgoyw](https://github.com/user-attachments/assets/f168182f-4d9a-44e0-94d7-08d018cc8a3a)
+![1_C_VYnhpys0UHrOuOgpgoyw](./assets/578288862-f168182f-4d9a-44e0-94d7-08d018cc8a3a.gif)
 
 </div>
 

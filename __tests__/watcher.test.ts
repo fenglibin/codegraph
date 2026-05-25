@@ -4,7 +4,7 @@
  * Tests for the file watcher that auto-syncs on changes.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -79,8 +79,57 @@ describe('waitFor helper (test-internal)', () => {
   });
 });
 
+/**
+ * Probe whether fs.watch({ recursive: true }) actually delivers events in the
+ * current environment. macOS FSEvents can be silently blocked when the host
+ * process lacks Full Disk Access (sandboxed terminals, some IDE-embedded
+ * shells), and Linux requires Node ≥ 19 for recursive support. In those
+ * environments the watcher tests would hang for 5 s each and false-fail the
+ * whole publish pipeline, even though production code is fine. We probe once
+ * and skip the event-driven cases when the platform can't deliver events.
+ */
+async function probeFsWatchUsable(): Promise<boolean> {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-probe-'));
+  try {
+    let received = false;
+    let watcher: fs.FSWatcher | null = null;
+    try {
+      watcher = fs.watch(probeDir, { recursive: true }, () => {
+        received = true;
+      });
+    } catch {
+      return false;
+    }
+    // Give fs.watch a beat to register, then write and wait briefly.
+    await new Promise((r) => setTimeout(r, 100));
+    fs.writeFileSync(path.join(probeDir, 'probe.ts'), 'x');
+    const start = Date.now();
+    while (!received && Date.now() - start < 800) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    watcher.close();
+    return received;
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+let fsWatchUsable = true;
+
 describe('FileWatcher', () => {
   let testDir: string;
+
+  beforeAll(async () => {
+    fsWatchUsable = await probeFsWatchUsable();
+    if (!fsWatchUsable) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[watcher.test] fs.watch did not deliver events in this environment ' +
+          '(likely macOS Full Disk Access denied or sandboxed shell). ' +
+          'Event-driven cases will be skipped; lifecycle cases still run.'
+      );
+    }
+  });
 
   beforeEach(() => {
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-watcher-'));
@@ -133,6 +182,7 @@ describe('FileWatcher', () => {
 
   describe('debounced sync', () => {
     it('should trigger sync after file change', async () => {
+      if (!fsWatchUsable) return;
       const syncFn = vi.fn().mockResolvedValue({ filesChanged: 1, durationMs: 10 });
       const watcher = new FileWatcher(testDir, syncFn, { debounceMs: 200 });
 
@@ -149,6 +199,7 @@ describe('FileWatcher', () => {
     });
 
     it('should debounce rapid changes into a single sync', async () => {
+      if (!fsWatchUsable) return;
       const syncFn = vi.fn().mockResolvedValue({ filesChanged: 1, durationMs: 10 });
       const watcher = new FileWatcher(testDir, syncFn, { debounceMs: 500 });
 
@@ -219,6 +270,7 @@ describe('FileWatcher', () => {
 
   describe('callbacks', () => {
     it('should call onSyncComplete after successful sync', async () => {
+      if (!fsWatchUsable) return;
       const syncFn = vi.fn().mockResolvedValue({ filesChanged: 2, durationMs: 50 });
       const onSyncComplete = vi.fn();
       const watcher = new FileWatcher(testDir, syncFn, {
@@ -237,6 +289,7 @@ describe('FileWatcher', () => {
     });
 
     it('should call onSyncError when sync throws', async () => {
+      if (!fsWatchUsable) return;
       const syncFn = vi.fn().mockRejectedValue(new Error('sync failed'));
       const onSyncError = vi.fn();
       const watcher = new FileWatcher(testDir, syncFn, {
@@ -304,6 +357,7 @@ describe('FileWatcher', () => {
     });
 
     it('should auto-sync when files change while watching', async () => {
+      if (!fsWatchUsable) return;
       cg = CodeGraph.initSync(testDir, {
         config: { include: ['**/*.ts'], exclude: [] },
       });
