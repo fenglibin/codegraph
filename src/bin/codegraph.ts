@@ -16,14 +16,21 @@
  *   codegraph files [options]    Show project file structure
  *   codegraph context <task>     Build context for a task
  *   codegraph affected [files]   Find test files affected by changes
+ *
+ * Memory note:
+ *   Indexing parses tree-sitter WASM grammars in a worker thread. The
+ *   per-worker WASM heap can only grow (WebAssembly spec), so for large
+ *   repos we recycle the worker every WORKER_RECYCLE_INTERVAL files
+ *   (see src/extraction/index.ts). If you still hit a "Fatal process
+ *   out of memory: Zone" error during indexing on a memory-constrained
+ *   machine, raise the heap with:
+ *
+ *     NODE_OPTIONS="--max-old-space-size=4096" codegraph sync
+ *
+ *   (`v8.setFlagsFromString('--max-old-space-size=…')` does NOT work —
+ *   that flag is read at isolate creation time, before any user code
+ *   runs, so it must be passed via CLI / NODE_OPTIONS.)
  */
-
-// !!! MUST run before any other require() — V8 heap must be resized
-//     before tree-sitter WASM compilation triggers Turboshaft OOM.
-//     --max-old-space-size=4096 gives V8 enough room for the
-//     Zone allocator that Turboshaft uses during WASM lowering.
-const v8 = require('v8');
-v8.setFlagsFromString('--max-old-space-size=4096');
 
 import { Command } from 'commander';
 import * as path from 'path';

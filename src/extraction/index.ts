@@ -46,9 +46,15 @@ const PARSE_TIMEOUT_MS = 10_000;
  * V8 isolate by terminating the worker thread and spawning a fresh one.
  * This interval balances memory usage against the cost of reloading grammars.
  *
- * Set to 50 so that even on memory-constrained machines (~4 GB available)
- * the WASM heap does not grow large enough to trigger a Zone OOM
- * during V8's Turboshaft WASM compilation.
+ * Lowered from 250 → 50 after a user reported a "Fatal process out of memory:
+ * Zone" crash at ~138/260 files on a memory-constrained machine. 50 is a
+ * conservative estimate (≈5x safety margin over the observed crash point);
+ * we have not yet measured the exact safe threshold per language. If users
+ * still OOM at this setting, the next steps are:
+ *   1. raise the heap via NODE_OPTIONS="--max-old-space-size=4096" (the
+ *      flag MUST come from the CLI / env — v8.setFlagsFromString does not
+ *      work for size flags); and / or
+ *   2. lower WORKER_RECYCLE_INTERVAL further (e.g. to 25).
  */
 const WORKER_RECYCLE_INTERVAL = 50;
 
@@ -659,17 +665,30 @@ export class ExtractionOrchestrator {
 
     /**
      * Recycle the worker thread to reclaim WASM memory.
-     * Terminates the current worker and clears the reference so
-     * ensureWorker() will spawn a fresh one on the next call.
+     *
+     * Awaits `terminate()` so the OS reclaims the worker's V8 isolate
+     * (and its WASM linear memory) **before** ensureWorker() spawns a
+     * fresh one. Without this await the old + new workers briefly
+     * coexist, doubling the peak memory and re-introducing the very
+     * Zone OOM we are trying to prevent (especially after we lowered
+     * WORKER_RECYCLE_INTERVAL — recycles are now 5x more frequent so
+     * the overlap window matters 5x more).
+     *
+     * `terminate()` can hang if WASM is stuck in a tight loop, so we
+     * race it against a 2s timeout. On timeout we drop the reference
+     * and let the OS clean up the orphan worker in the background; the
+     * next ensureWorker() will spawn a fresh one regardless.
      */
-    function recycleWorker(): void {
+    async function recycleWorker(): Promise<void> {
       if (!parseWorker) return;
       log(`Recycling worker after ${workerParseCount} parses (heap: ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB RSS)`);
       const w = parseWorker;
       parseWorker = null;
       workerParseCount = 0;
-      // Fire-and-forget: worker.terminate() can hang if WASM is stuck
-      w.terminate().catch(() => {});
+      await Promise.race([
+        w.terminate().catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+      ]);
     }
 
     async function requestParse(filePath: string, content: string): Promise<ExtractionResult> {
