@@ -25,7 +25,7 @@ This project has a CodeGraph MCP server (`codegraph_*` tools) configured. CodeGr
 ### 🚫 Mandatory rules — do NOT skip
 
 These are **rules**, not suggestions. Models that haven't been
-fine-tuned on codegraph (DeepSeek, Qwen, GLM, …) often fall back to
+fine-tuned on codegraph (DeepSeek, Qwen, GLM, HunYuan, …) often fall back to
 grep/Read by training-data habit even when codegraph is faster.
 
 1. **NEVER grep / find / Read to look up a symbol by name.** Use `codegraph_search` or `codegraph_context` first.

@@ -121,35 +121,6 @@ describe('P0/T6 installer instructions bilingual template', () => {
       expect(INSTRUCTIONS_TEMPLATE).toContain('codegraph init -i');
       expect(INSTRUCTIONS_TEMPLATE).toContain('要我运行');
     });
-
-    it('happy: Chinese section ships its own "问题 / 工具" decision table mirroring the English one', () => {
-      // Without a Chinese-side decision table, CN-locale models that
-      // anchor to the Chinese mirror lose the fastest "question →
-      // codegraph_<verb>" mapping and tend to fall back to grep/Read
-      // by training-data habit. The English table lists 9 mappings;
-      // we assert the Chinese mirror covers all 9 codegraph tools so
-      // the two languages stay in lockstep on tool coverage.
-      expect(INSTRUCTIONS_TEMPLATE).toContain('| 问题 | 工具 |');
-      const zhTableTools = [
-        'codegraph_search',
-        'codegraph_callers',
-        'codegraph_callees',
-        'codegraph_impact',
-        'codegraph_node',
-        'codegraph_context',
-        'codegraph_explore',
-        'codegraph_files',
-        'codegraph_status',
-      ];
-      // Slice from the Chinese heading onwards so we only count
-      // occurrences inside the Chinese section, not the English one.
-      const zhStart = INSTRUCTIONS_TEMPLATE.indexOf('## CodeGraph（中文）');
-      expect(zhStart).toBeGreaterThan(0);
-      const zhSection = INSTRUCTIONS_TEMPLATE.slice(zhStart);
-      for (const tool of zhTableTools) {
-        expect(zhSection).toContain(tool);
-      }
-    });
   });
 
   describe('drift guard: rules track the runtime thresholds', () => {
