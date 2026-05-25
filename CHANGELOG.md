@@ -95,7 +95,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [#283](https://github.com/colbymchenry/codegraph/issues/283).
 
 ### Fixed
-- **Windows: `npm i -g @colbymchenry/codegraph` then any `codegraph` command
+- **Windows: `npm i -g @xuefadevdev/codegraph` then any `codegraph` command
   failed with `spawnSync …\codegraph.cmd EINVAL`.** The npm launcher spawned the
   bundle's `.cmd` file directly, which modern Node refuses to do on Windows
   (the CVE-2024-27980 hardening — seen on Node 24). The launcher now invokes the
@@ -136,7 +136,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Standalone installers** (`curl … | sh`, `irm … | iex`): the bundled launcher
   failed with `exec: …/node: not found` because it didn't resolve the symlink the
   installer puts on your PATH. Installing on a machine with **no Node** now works.
-- **npm**: `@colbymchenry/codegraph-linux-x64` is now published — the 0.9.0
+- **npm**: `@xuefadevdev/codegraph-linux-x64` is now published — the 0.9.0
   release silently shipped 6 of 7 packages, so `npm i -g` on linux-x64 couldn't
   find its bundle. The release pipeline now verifies every package reached the
   registry (and is idempotent), so a release can't pass green-but-broken again.
@@ -169,7 +169,7 @@ curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install
 # Windows (PowerShell) — no Node required
 irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex
 # or, if you have Node (any version):
-npm i -g @colbymchenry/codegraph
+npm i -g @xuefadevdev/codegraph
 ```
 
 ### Added
@@ -358,7 +358,7 @@ npm i -g @colbymchenry/codegraph
   CodeGraph's copy. CodeGraph now requires `better-sqlite3` `^12.4.1`, whose
   prebuilds include Node 24, so a fresh install on Node 22 or Node 24 gets the
   native backend with no compiler. On an already-broken install, reinstall
-  CodeGraph (e.g. `npm install -g @colbymchenry/codegraph`) to pull the new
+  CodeGraph (e.g. `npm install -g @xuefadevdev/codegraph`) to pull the new
   binding; `codegraph status` should then report `Backend: native`. Thanks to
   [@Finndersen](https://github.com/Finndersen) for the report.
 - **MCP**: tools no longer fail with "CodeGraph not initialized" when the index
@@ -552,7 +552,7 @@ Thank you.
 
   Already on 0.7.5? Either upgrade to 0.7.6, or unblock yourself in place:
   ```bash
-  chmod +x "$(npm root -g)/@colbymchenry/codegraph/dist/bin/codegraph.js"
+  chmod +x "$(npm root -g)/@xuefadevdev/codegraph/dist/bin/codegraph.js"
   ```
 
 [0.7.6]: https://github.com/colbymchenry/codegraph/releases/tag/v0.7.6

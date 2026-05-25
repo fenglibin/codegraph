@@ -593,10 +593,10 @@ describe('Installer targets — partial-state idempotency', () => {
     const file = seedSettings('local', {
       hooks: {
         PostToolUse: [
-          { matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'npx @colbymchenry/codegraph mark-dirty', async: true }] },
+          { matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'npx @xuefadevdev/codegraph mark-dirty', async: true }] },
         ],
         Stop: [
-          { hooks: [{ type: 'command', command: 'npx @colbymchenry/codegraph sync-if-dirty' }] },
+          { hooks: [{ type: 'command', command: 'npx @xuefadevdev/codegraph sync-if-dirty' }] },
         ],
       },
     });
