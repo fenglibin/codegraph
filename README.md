@@ -576,6 +576,13 @@ CodeGraph 针对国产大模型做了专门优化，使中文模型能获得接�
 
 **watcher 失效时索引陈旧** — 当文件监听器因 WSL2、网络盘、Docker bind mount 等场景失效时，AI 启动时收到的 SERVER_INSTRUCTIONS 会包含 `⚠️ watcher inactive` 警告。你可以手动跑 `codegraph sync` 刷新索引，或移项目到本地磁盘。
 
+**索引时崩溃 `Fatal process out of memory: Zone`** — Node 22..24 的 V8 turboshaft 在编译 tree-sitter 大型 WASM grammar 时会触发编译期 Zone 分配 OOM（栈帧含 `BackgroundCompileJob` / `WasmLoweringReducer`）。0.10.5+ 已自动以 `--liftoff-only` 子进程模式绕开此问题，运行 `codegraph index` / `codegraph sync` 时应在 stderr 看到 `[CodeGraph] Engaging WASM Liftoff-only mode...`。如仍崩：
+
+- 升级到 0.10.5 或更高版本（`npm i -g @xuefadevdev/codegraph@latest`）
+- 提升堆：`NODE_OPTIONS="--max-old-space-size=8192" codegraph index`
+- 切换到 Node 22 LTS（`nvm install 22 && nvm use 22`）
+- 调试自动绕开模式：`CODEGRAPH_NO_REEXEC=1 codegraph index`（仅排错用，会再次 OOM）
+
 ---
 
 ## 技术架构说明

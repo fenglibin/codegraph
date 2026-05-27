@@ -6,3 +6,4 @@
 | [0002](0002-p2-f4-smart-stale.md) | 2026-05-22 | P2/F-4 智能 Staleness 检测（Git-aware）— footer 从盲计时器升级为 git 双信号 4 分支决策，覆盖率 ~95%→~100% | ✅ 完成 |
 | [0003](0003-auto-allow-single-target.md) | 2026-05-25 | shouldAskAutoAllow 只有 Claude 单独选中才返回 true；resolveTargets 默认不勾选任何项，让用户自己选择 | ✅ 完成 |
 | [0004](0004-fix-worker-oom.md) | 2026-05-25 | 修复 Worker OOM：WORKER_RECYCLE_INTERVAL 250→50 + recycleWorker await terminate 消除双 worker 并存窗口 + PARSER_RESET_INTERVAL 5000→500；撤回无效的 v8.setFlagsFromString（实测对 max-old-space-size 不生效），改为 NODE_OPTIONS 文档化引导 | ✅ 完成 |
+| [0005](0005-fix-wasm-compile-oom.md) | 2026-05-27 | 修复 V8 turboshaft WASM 编译期 Zone OOM（370 文件项目 42% 解析崩溃）：自动 re-exec 子进程注入 `--liftoff-only` 绕开 turboshaft pipeline + 修 0004 漏拦的 retry/strip 路径 `recycleWorker()` 缺 `await`；测试规模 867→907 cases；详方案文档 `docs/wasm-compile-oom-rationale.md` | ✅ 完成 |

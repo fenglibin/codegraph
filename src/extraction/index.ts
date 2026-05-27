@@ -46,15 +46,23 @@ const PARSE_TIMEOUT_MS = 10_000;
  * V8 isolate by terminating the worker thread and spawning a fresh one.
  * This interval balances memory usage against the cost of reloading grammars.
  *
- * Lowered from 250 → 50 after a user reported a "Fatal process out of memory:
- * Zone" crash at ~138/260 files on a memory-constrained machine. 50 is a
- * conservative estimate (≈5x safety margin over the observed crash point);
- * we have not yet measured the exact safe threshold per language. If users
- * still OOM at this setting, the next steps are:
- *   1. raise the heap via NODE_OPTIONS="--max-old-space-size=4096" (the
- *      flag MUST come from the CLI / env — v8.setFlagsFromString does not
- *      work for size flags); and / or
- *   2. lower WORKER_RECYCLE_INTERVAL further (e.g. to 25).
+ * Lowered from 250 → 50 in 0004 after a Zone OOM at ~138/260 files. 0004
+ * targeted WASM linear memory growth.
+ *
+ * **0005 footnote** (2026-05-27): a follow-up Zone OOM at ~155/370 files
+ * was diagnosed as a SEPARATE V8 region — the turboshaft tier-up
+ * compile-zone, NOT linear memory. Lowering this interval further would
+ * actually backfire (more frequent worker spawns = more frequent WASM
+ * tier-up compiles = more turboshaft Zone allocations). 0005 mitigates
+ * the turboshaft path orthogonally via re-exec with `--liftoff-only`
+ * (see src/bin/wasm-reexec.ts) and leaves this interval at 50.
+ *
+ * If users still OOM despite 0004 + 0005:
+ *   1. Verify the Liftoff-only re-exec is engaging — stderr should
+ *      show "[CodeGraph] Engaging WASM Liftoff-only mode ..."
+ *   2. Raise heap via NODE_OPTIONS="--max-old-space-size=8192"
+ *   3. Lower this interval cautiously (e.g. 25) — each step doubles
+ *      WASM tier-up frequency in the absence of --liftoff-only
  */
 const WORKER_RECYCLE_INTERVAL = 50;
 
@@ -895,8 +903,13 @@ export class ExtractionOrchestrator {
         const filePath = errEntry.filePath!;
         if (signal?.aborted) break;
 
-        // Fresh worker for every retry — maximum WASM headroom
-        recycleWorker();
+        // Fresh worker for every retry — maximum WASM headroom.
+        // MUST await: fire-and-forget here re-introduces the
+        // double-worker-coexistence window 0004 fixed in the main
+        // loop. Both old + new worker briefly hold WASM linear
+        // memory, doubling the peak (see docs/wasm-compile-oom-
+        // rationale.md §2.3 / changes/0005).
+        await recycleWorker();
 
         let content: string;
         try {
@@ -941,7 +954,8 @@ export class ExtractionOrchestrator {
           const filePath = errEntry.filePath!;
           if (signal?.aborted) break;
 
-          recycleWorker();
+          // MUST await — same rationale as the retryableErrors loop above.
+          await recycleWorker();
 
           let fullContent: string;
           try {

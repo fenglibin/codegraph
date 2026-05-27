@@ -18,14 +18,27 @@
  *   codegraph affected [files]   Find test files affected by changes
  *
  * Memory note:
- *   Indexing parses tree-sitter WASM grammars in a worker thread. The
- *   per-worker WASM heap can only grow (WebAssembly spec), so for large
- *   repos we recycle the worker every WORKER_RECYCLE_INTERVAL files
- *   (see src/extraction/index.ts). If you still hit a "Fatal process
- *   out of memory: Zone" error during indexing on a memory-constrained
- *   machine, raise the heap with:
+ *   Indexing parses tree-sitter WASM grammars in a worker thread. There
+ *   are TWO independent V8 memory regions that can OOM here, and they
+ *   require separate mitigations:
  *
- *     NODE_OPTIONS="--max-old-space-size=4096" codegraph sync
+ *   (1) WASM linear memory (the parser's heap, grows but never shrinks
+ *       per WebAssembly spec) — mitigated by recycling the worker
+ *       every WORKER_RECYCLE_INTERVAL files (see src/extraction/
+ *       index.ts). This was 0004's fix.
+ *
+ *   (2) V8 turboshaft compile-zone (the Node JIT's per-compilation
+ *       arena) — on Node 22..24 the WASM tier-up to turboshaft can
+ *       OOM with `Fatal process out of memory: Zone` mid-parse. The
+ *       0004 fix does NOT touch this region. Mitigated since 0005
+ *       by re-execing the CLI as a child of `node --liftoff-only ...`
+ *       which forces baseline-only WASM compilation, sidestepping
+ *       turboshaft entirely. See src/bin/wasm-reexec.ts.
+ *
+ *   If you still hit a "Fatal process out of memory: Zone" error
+ *   despite the above, you can:
+ *     - Set CODEGRAPH_NO_REEXEC=1 to disable the workaround (debug only)
+ *     - Raise heap further with NODE_OPTIONS="--max-old-space-size=8192"
  *
  *   (`v8.setFlagsFromString('--max-old-space-size=…')` does NOT work —
  *   that flag is read at isolate creation time, before any user code
@@ -88,17 +101,56 @@ if (nodeMajor < MIN_NODE_MAJOR) {
   // Override active — banner shown for visibility, continuing.
 }
 
-// Check if running with no arguments - run installer
-if (process.argv.length === 2) {
-  import('../installer').then(({ runInstaller }) =>
-    runInstaller()
-  ).catch((err) => {
-    console.error('Installation failed:', err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  });
+// WASM Liftoff-only re-exec for Node 22..24.
+//
+// V8's turboshaft tier-up compiler for WASM allocates an unbounded
+// compile-zone when lowering tree-sitter's large WASM grammars. On
+// projects with ~370+ files this OOMs mid-parse with `Zone::Expand`
+// in `BackgroundCompileJob::Run`. The 0004 fix (worker recycling)
+// addressed WASM linear memory but did NOT touch the compile-zone
+// — the two are independent V8 memory regions. See
+// docs/wasm-compile-oom-rationale.md for the full root-cause
+// analysis and changes/0005 for this fix.
+//
+// The re-exec spawns a fresh `node --liftoff-only` child that runs
+// the same script + argv + env, then forwards stdio / signals /
+// exit code. Only triggered for `index` / `sync` / `init` / `install`
+// (the four subcommands that load WASM grammars); all other commands
+// run in the original process for fast startup.
+//
+// IMPORTANT: when re-exec fires we MUST skip the rest of this module's
+// top-level (the installer + main() dispatch below). reExecWithLiftoff
+// Only returns a never-resolving promise, but a synchronous module
+// keeps executing the next statement regardless. We use an early-exit
+// `else` block to fence off the original CLI flow.
+//
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { shouldReExec, reExecWithLiftoffOnly } = require('./wasm-reexec') as
+  typeof import('./wasm-reexec');
+const reExecNeeded = shouldReExec({
+  argv: process.argv,
+  env: process.env,
+  nodeMajor,
+});
+
+if (reExecNeeded) {
+  // Hand off to the child. reExecWithLiftoffOnly registers async
+  // exit-on-child-exit handlers, then returns a never-resolving
+  // promise; we await it implicitly by NOT taking the else branch.
+  reExecWithLiftoffOnly();
 } else {
-  // Normal CLI flow
-  main();
+  // Normal CLI flow runs in the original process.
+  if (process.argv.length === 2) {
+    // No args → run installer
+    import('../installer').then(({ runInstaller }) =>
+      runInstaller()
+    ).catch((err) => {
+      console.error('Installation failed:', err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    });
+  } else {
+    main();
+  }
 }
 
 process.on('uncaughtException', (error) => {
