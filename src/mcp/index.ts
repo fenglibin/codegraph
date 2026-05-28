@@ -21,6 +21,8 @@ import { watchDisabledReason } from '../sync';
 import { StdioTransport, JsonRpcRequest, JsonRpcNotification, ErrorCodes } from './transport';
 import { tools, ToolHandler } from './tools';
 import { buildServerInstructions } from './server-instructions';
+import { StatsWriter } from './stats-writer';
+import { debugLog, debugLogSessionStart, debugWarn, debugError } from './debug-log';
 
 /**
  * Convert a file:// URI to a filesystem path.
@@ -95,6 +97,8 @@ export class MCPServer {
   // Guards the one-shot deferred resolution (roots/list or cwd) so we don't
   // re-issue roots/list on every tool call.
   private rootsAttempted = false;
+  // Persists session stats to ~/.codegraph/stats/ for the dashboard.
+  private statsWriter: StatsWriter | null = null;
 
   constructor(projectPath?: string) {
     this.projectPath = projectPath || null;
@@ -110,6 +114,9 @@ export class MCPServer {
    * is received, which includes the rootUri from the client.
    */
   async start(): Promise<void> {
+    debugLogSessionStart();
+    debugLog('server', 'MCP Server starting', { projectPath: this.projectPath });
+
     // Start listening for messages immediately - don't check initialization yet
     // We'll get the project path from the initialize request's rootUri
     this.transport.start(this.handleMessage.bind(this));
@@ -135,26 +142,32 @@ export class MCPServer {
    * are still possible.
    */
   private async tryInitializeDefault(projectPath: string): Promise<void> {
+    debugLog('init', 'tryInitializeDefault called', { projectPath });
     // Record where we searched so a later "not initialized" error can name it.
     this.toolHandler.setDefaultProjectHint(projectPath);
 
     // Walk up parent directories to find nearest .codegraph/
     const resolvedRoot = findNearestCodeGraphRoot(projectPath);
+    debugLog('init', 'findNearestCodeGraphRoot result', { resolvedRoot: resolvedRoot || '(none)' });
 
     if (!resolvedRoot) {
       this.projectPath = projectPath;
+      this.ensureStatsWriter(projectPath);
+      debugLog('init', 'No .codegraph/ found, using projectPath as-is');
       return;
     }
 
     this.projectPath = resolvedRoot;
+    this.ensureStatsWriter(resolvedRoot);
 
     try {
       this.cg = await CodeGraph.open(resolvedRoot);
       this.toolHandler.setDefaultCodeGraph(this.cg);
+      debugLog('init', 'CodeGraph opened successfully', { resolvedRoot });
       this.startWatching();
     } catch (err) {
-      // Log the error so transient failures are diagnosable (see issue #47)
       const msg = err instanceof Error ? err.message : String(err);
+      debugLog('init', 'Failed to open CodeGraph', { resolvedRoot, error: msg }, 'ERROR');
       process.stderr.write(`[CodeGraph MCP] Failed to open project at ${resolvedRoot}: ${msg}\n`);
     }
   }
@@ -209,6 +222,7 @@ export class MCPServer {
       this.cg = CodeGraph.openSync(resolvedRoot);
       this.projectPath = resolvedRoot;
       this.toolHandler.setDefaultCodeGraph(this.cg);
+      this.ensureStatsWriter(resolvedRoot);
       this.startWatching();
     } catch {
       // Still failing — will retry on next tool call
@@ -283,6 +297,12 @@ export class MCPServer {
    * Stop the server
    */
   stop(): void {
+    debugLog('server', 'MCP Server stopping', { hasStatsWriter: !!this.statsWriter });
+    // Flush stats to disk before shutdown
+    if (this.statsWriter) {
+      this.statsWriter.flush();
+      debugLog('stats', 'Stats flushed on shutdown');
+    }
     // Close all cached cross-project connections first
     this.toolHandler.closeAll();
     // Close the main CodeGraph instance
@@ -292,6 +312,34 @@ export class MCPServer {
     }
     this.transport.stop();
     process.exit(0);
+  }
+
+  /**
+   * Create the StatsWriter (once) when the project path is known,
+   * and wire it into the ToolHandler's onStatsUpdate callback.
+   */
+  private ensureStatsWriter(projectPath: string): void {
+    if (this.statsWriter) {
+      debugLog('stats', 'ensureStatsWriter: already created, skipping');
+      return;
+    }
+    try {
+      this.statsWriter = new StatsWriter(projectPath);
+      this.toolHandler.setOnStatsUpdate((snapshot) => {
+        debugLog('stats', 'onStatsUpdate fired', {
+          toolCount: snapshot.tools.size,
+          totalCalls: [...snapshot.tools.values()].reduce((sum, t) => sum + t.count, 0),
+        });
+        this.statsWriter?.scheduleWrite(snapshot);
+      });
+      debugLog('stats', 'StatsWriter created and wired', { projectPath });
+    } catch (err) {
+      debugError('stats', 'Failed to create StatsWriter', {
+        projectPath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Stats persistence is best-effort — never break the MCP server
+    }
   }
 
   /**
@@ -461,6 +509,14 @@ export class MCPServer {
     // initialized after the MCP server started (e.g. user ran codegraph init)
     await this.retryInitIfNeeded();
 
+    // Ensure stats writer is wired up (safety net for all init paths)
+    if (this.projectPath) {
+      this.ensureStatsWriter(this.projectPath);
+    } else {
+      debugWarn('tools/call', 'projectPath is null — StatsWriter cannot be created', { toolName });
+    }
+
+    debugLog('tools/call', `Executing tool`, { toolName, hasStatsWriter: !!this.statsWriter, projectPath: this.projectPath });
     const result = await this.toolHandler.execute(toolName, toolArgs);
 
     this.transport.sendResult(request.id, result);

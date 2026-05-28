@@ -7,6 +7,9 @@
 import CodeGraph, { findNearestCodeGraphRoot } from '../index';
 import type { Node, Edge, SearchResult, Subgraph, TaskContext, NodeKind } from '../types';
 import { createHash } from 'crypto';
+import { readAllStats, readProjectHistory, projectHash } from './stats-writer';
+import type { StatsFile } from './stats-writer';
+import { debugLog, debugWarn } from './debug-log';
 import {
   constants as fsConstants,
   closeSync,
@@ -133,7 +136,7 @@ export const _internal_INDEX_AGE_STALE_MINUTES =
  * qualifies; explore/files/etc. all reflect the indexed state and
  * benefit from a freshness signal.
  */
-const TOOLS_SKIP_INDEX_AGE = new Set<string>(['codegraph_status']);
+const TOOLS_SKIP_INDEX_AGE = new Set<string>(['codegraph_status', 'codegraph_usage']);
 
 /**
  * Change-signal payload accepted by {@link _internal_formatIndexAgeFooter} —
@@ -681,6 +684,20 @@ export const tools: ToolDefinition[] = [
       },
     },
   },
+  {
+    name: 'codegraph_usage',
+    description: 'Get usage statistics for all CodeGraph-enabled projects. Shows tool call counts, latency, cache hit rates, and uptime. Reads from persisted stats across all projects.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        scope: {
+          type: 'string',
+          description: 'Scope of stats to return: "all" (all projects), "current" (current project only), or "history" (daily history for current project). Default: "all".',
+          enum: ['all', 'current', 'history'],
+        },
+      },
+    },
+  },
 ];
 
 /**
@@ -712,7 +729,19 @@ export class ToolHandler {
   private stats: Map<string, ToolStats> = new Map();
   private startedAt: number = Date.now();
 
+  // Optional callback invoked after each tool execution with a stats snapshot.
+  // Used by StatsWriter to persist usage data to disk.
+  private onStatsUpdate: ((snapshot: { startedAt: number; tools: Map<string, ToolStats>; cache: { hits: number; misses: number; size: number; maxSize: number } | null }) => void) | null = null;
+
   constructor(private cg: CodeGraph | null) {}
+
+  /**
+   * Set a callback that fires after every tool execution with the current stats snapshot.
+   * Used by MCPServer to wire in the StatsWriter.
+   */
+  setOnStatsUpdate(cb: (snapshot: { startedAt: number; tools: Map<string, ToolStats>; cache: { hits: number; misses: number; size: number; maxSize: number } | null }) => void): void {
+    this.onStatsUpdate = cb;
+  }
 
   /**
    * Update the default CodeGraph instance (e.g. after lazy initialization)
@@ -907,6 +936,31 @@ export class ToolHandler {
     const elapsed = performance.now() - t0;
     this.recordCall(toolName, elapsed, isError);
 
+    // Log tool execution result (especially errors for debugging)
+    if (isError) {
+      const errorText = result.content?.[0]?.type === 'text' ? result.content[0].text.slice(0, 200) : '(unknown)';
+      debugWarn('execute', `Tool returned error`, { toolName, elapsed: elapsed.toFixed(1), error: errorText });
+    } else {
+      debugLog('execute', `Tool executed OK`, { toolName, elapsed: elapsed.toFixed(1) }, 'DEBUG');
+    }
+
+    // Notify stats listener (for disk persistence via StatsWriter)
+    // MUST fire before any early return so stats are always persisted.
+    if (this.onStatsUpdate) {
+      try {
+        let cache: { hits: number; misses: number; size: number; maxSize: number } | null = null;
+        try {
+          const cg = this.tryGetCodeGraph(args.projectPath as string | undefined);
+          if (cg) cache = cg.getCacheStats();
+        } catch { /* no cache stats available */ }
+        this.onStatsUpdate({ startedAt: this.startedAt, tools: this.stats, cache });
+      } catch (err) {
+        debugLog('execute', 'onStatsUpdate callback threw', { error: err instanceof Error ? err.message : String(err) });
+      }
+    } else {
+      debugWarn('execute', 'onStatsUpdate is null — stats will NOT be persisted', { toolName });
+    }
+
     // Early return for errors — no footer needed
     if (isError) {
       return result;
@@ -952,6 +1006,7 @@ export class ToolHandler {
       // Footer is purely informational. Any failure (cg not loaded,
       // DB transient error, etc.) must not break the actual response.
     }
+
     return result;
   }
 
@@ -979,6 +1034,8 @@ export class ToolHandler {
         return await this.handleStatus(args);
       case 'codegraph_files':
         return await this.handleFiles(args);
+      case 'codegraph_usage':
+        return await this.handleUsage(args);
       default:
         return this.errorResult(`Unknown tool: ${toolName}`);
     }
@@ -1810,6 +1867,192 @@ export class ToolHandler {
     lines.push('', `**Uptime:** ${uptimeStr}`);
 
     return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * Handle codegraph_usage — return persisted usage stats from ~/.codegraph/stats/
+   */
+  private async handleUsage(args: Record<string, unknown>): Promise<ToolResult> {
+    const scope = (args.scope as string) || 'all';
+
+    if (scope === 'all') {
+      return this.formatAllUsageStats();
+    }
+
+    if (scope === 'current') {
+      // Find stats for the current project
+      const all = readAllStats();
+
+      // Try to match by the default project hint or find the most recently updated
+      if (all.length === 0) {
+        return this.textResult('No usage stats found. Stats are recorded after CodeGraph tools are used in a project.');
+      }
+
+      // Return the most recently updated project as "current"
+      const sorted = [...all].sort((a, b) => b.updatedAt - a.updatedAt);
+      return this.textResult(this.formatSingleProjectStats(sorted[0]!));
+    }
+
+    if (scope === 'history') {
+      // Find current project and return its history
+      const all = readAllStats();
+      if (all.length === 0) {
+        return this.textResult('No usage stats found.');
+      }
+
+      const sorted = [...all].sort((a, b) => b.updatedAt - a.updatedAt);
+      const current = sorted[0]!;
+      const hash = projectHash(current.project);
+      const history = readProjectHistory(hash);
+
+      if (history.length === 0) {
+        return this.textResult(`No history data for project "${current.projectName}". History is created when the MCP server restarts on a new day.`);
+      }
+
+      const lines: string[] = [
+        `## Usage History: ${current.projectName}`,
+        '',
+        '| Date | Calls | Errors | Cache Hit% | Uptime |',
+        '|------|-------|--------|-----------|--------|',
+      ];
+
+      for (const entry of history) {
+        const date = new Date(entry.startedAt).toLocaleDateString();
+        let calls = 0, errors = 0;
+        for (const t of Object.values(entry.tools)) {
+          calls += t.count;
+          errors += t.errors;
+        }
+        const total = entry.cache.hits + entry.cache.misses;
+        const rate = total > 0 ? ((entry.cache.hits / total) * 100).toFixed(1) + '%' : '—';
+        const uptime = this.formatDuration(entry.updatedAt - entry.startedAt);
+        lines.push(`| ${date} | ${calls} | ${errors} | ${rate} | ${uptime} |`);
+      }
+
+      return this.textResult(lines.join('\n'));
+    }
+
+    return this.errorResult(`Invalid scope: "${scope}". Use "all", "current", or "history".`);
+  }
+
+  private formatAllUsageStats(): ToolResult {
+    const all = readAllStats();
+
+    if (all.length === 0) {
+      return this.textResult('No usage stats found. Stats are recorded after CodeGraph tools are used in a project.\n\nTip: Use CodeGraph tools in a project, then call this again.');
+    }
+
+    const lines: string[] = ['## CodeGraph Usage (all projects)', ''];
+
+    // Summary
+    let totalCalls = 0, totalErrors = 0, totalHits = 0, totalMisses = 0;
+    for (const s of all) {
+      for (const t of Object.values(s.tools)) {
+        totalCalls += t.count;
+        totalErrors += t.errors;
+      }
+      totalHits += s.cache.hits;
+      totalMisses += s.cache.misses;
+    }
+    const cacheTotal = totalHits + totalMisses;
+    const hitRate = cacheTotal > 0 ? ((totalHits / cacheTotal) * 100).toFixed(1) + '%' : '—';
+
+    lines.push(`**Projects:** ${all.length} | **Total Calls:** ${totalCalls} | **Total Errors:** ${totalErrors} | **Cache Hit Rate:** ${hitRate}`);
+    lines.push('');
+
+    // Per-project table
+    lines.push('| Project | Calls | Errors | Cache Hit% | Uptime | Last Active |');
+    lines.push('|---------|-------|--------|-----------|--------|-------------|');
+
+    const sorted = [...all].sort((a, b) => b.updatedAt - a.updatedAt);
+    for (const s of sorted) {
+      let calls = 0, errors = 0;
+      for (const t of Object.values(s.tools)) {
+        calls += t.count;
+        errors += t.errors;
+      }
+      const ct = s.cache.hits + s.cache.misses;
+      const rate = ct > 0 ? ((s.cache.hits / ct) * 100).toFixed(1) + '%' : '—';
+      const uptime = this.formatDuration(s.updatedAt - s.startedAt);
+      const lastActive = this.formatTimeAgo(s.updatedAt);
+      lines.push(`| ${s.projectName} | ${calls} | ${errors} | ${rate} | ${uptime} | ${lastActive} |`);
+    }
+
+    // Tool breakdown across all projects
+    lines.push('', '### Tool Breakdown (all projects)', '');
+    const toolTotals = new Map<string, { count: number; errors: number; totalMs: number }>();
+    for (const s of all) {
+      for (const [name, t] of Object.entries(s.tools)) {
+        const existing = toolTotals.get(name) || { count: 0, errors: 0, totalMs: 0 };
+        existing.count += t.count;
+        existing.errors += t.errors;
+        existing.totalMs += t.totalMs;
+        toolTotals.set(name, existing);
+      }
+    }
+
+    lines.push('| Tool | Calls | Errors | Avg (ms) |');
+    lines.push('|------|-------|--------|----------|');
+    const toolSorted = [...toolTotals.entries()].sort((a, b) => b[1].count - a[1].count);
+    for (const [name, t] of toolSorted) {
+      const avg = t.count > 0 ? (t.totalMs / t.count).toFixed(1) : '—';
+      lines.push(`| ${name} | ${t.count} | ${t.errors} | ${avg} |`);
+    }
+
+    return this.textResult(lines.join('\n'));
+  }
+
+  private formatSingleProjectStats(s: StatsFile): string {
+    const lines: string[] = [
+      `## Usage: ${s.projectName}`,
+      '',
+      `**Path:** ${s.project}`,
+      `**Started:** ${new Date(s.startedAt).toLocaleString()}`,
+      `**Last Updated:** ${new Date(s.updatedAt).toLocaleString()}`,
+      `**Uptime:** ${this.formatDuration(s.updatedAt - s.startedAt)}`,
+      '',
+    ];
+
+    // Cache stats
+    const total = s.cache.hits + s.cache.misses;
+    const hitRate = total > 0 ? ((s.cache.hits / total) * 100).toFixed(1) + '%' : '—';
+    lines.push(`**Node Cache:** ${s.cache.hits} hits / ${s.cache.misses} misses (${hitRate}) | ${s.cache.size}/${s.cache.maxSize} capacity`);
+    lines.push('');
+
+    // Tool table
+    lines.push('| Tool | Calls | Errors | Avg (ms) | Min (ms) | Max (ms) |');
+    lines.push('|------|-------|--------|----------|----------|----------|');
+
+    const sorted = Object.entries(s.tools).sort((a, b) => b[1].count - a[1].count);
+    for (const [name, t] of sorted) {
+      const avg = t.count > 0 ? (t.totalMs / t.count).toFixed(1) : '—';
+      const min = t.minMs === 0 && t.count === 0 ? '—' : t.minMs.toFixed(1);
+      const max = t.maxMs.toFixed(1);
+      lines.push(`| ${name} | ${t.count} | ${t.errors} | ${avg} | ${min} | ${max} |`);
+    }
+
+    return lines.join('\n');
+  }
+
+  private formatDuration(ms: number): string {
+    const sec = Math.floor(ms / 1000);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m`;
+    return `${sec}s`;
+  }
+
+  private formatTimeAgo(epochMs: number): string {
+    const diff = Date.now() - epochMs;
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const days = Math.floor(hr / 24);
+    return `${days}d ago`;
   }
 
   /**

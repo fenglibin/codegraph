@@ -376,6 +376,7 @@ codegraph files [path]            # 显示文件结构（--format, --filter, --m
 codegraph context <task>          # 为 AI 构建上下文（--format, --max-nodes）
 codegraph affected [files...]     # 找出受影响的测试文件（见下）
 codegraph serve --mcp             # 启动 MCP 服务器
+codegraph dashboard               # 启动使用统计 Dashboard（--port 自定义端口）
 ```
 
 ### `codegraph affected`
@@ -422,6 +423,7 @@ fi
 | `codegraph_node` | 获取某个特定符号的详细信息（可选含源码） |
 | `codegraph_files` | 获取已索引的文件结构（比文件系统扫描更快） |
 | `codegraph_status` | 检查索引健康状态和统计信息 |
+| `codegraph_usage` | 查看所有项目的使用统计（调用次数、延迟、缓存命中率） |
 
 **🔴 信任信号**：所有数据查询类工具（callers / callees / impact / context 等）的响应中，每条边都附带"产地 + 置信度"标签（如 `[tree-sitter, conf:0.95]` 或 `[heuristic, conf:0.6 ⚠️]`）。响应末尾自动追加 **Git 智能 staleness 页脚**：
 
@@ -471,6 +473,54 @@ cg.close();
 - 大于 1 MB 的文件会被跳过（生成的打包文件、压缩 JS、vendor 大文件）— 它们消耗解析预算却得不到有用的符号。
 
 > 已提交但未被 gitignore 的文件**会被索引**，即使在 `vendor/` 下或已提交的 `dist/` 下。如果你提交了一个你不想要出现在图谱中的依赖或构建目录，请把它加到 `.gitignore`。
+
+## 使用统计
+
+CodeGraph 自动追踪每个项目的使用情况——工具调用次数、查询延迟、Node 缓存命中率等。你可以通过以下三种方式查看：
+
+### 方式 1：Dashboard 网页（推荐）
+
+```bash
+codegraph dashboard              # 启动 Dashboard（默认端口 7890）
+codegraph dashboard --port 8080  # 自定义端口
+```
+
+浏览器自动打开，显示所有接入 CodeGraph 项目的实时统计仪表盘：
+
+- **汇总视图** — 总调用数、总错误、平均延迟、整体缓存命中率
+- **分项目卡片** — 工具调用柱状图、缓存详情、运行时长
+- **历史趋势** — 每日统计对比（保留 30 天）
+- 支持暗色模式，每 5 秒自动刷新
+
+### 方式 2：MCP Tool `codegraph_usage`
+
+在 AI Agent 对话中直接调用：
+
+| 参数 | 说明 |
+|------|------|
+| `scope: "all"` | 所有项目汇总 + 各项目概览 + 全局 tool 排行 |
+| `scope: "current"` | 当前项目的详细统计 |
+| `scope: "history"` | 当前项目的每日历史趋势 |
+
+### 方式 3：`codegraph_status` 追加输出
+
+调用 `codegraph_status` 时末尾自动显示当前 session 的使用统计和缓存命中率。
+
+### 缓存命中率
+
+CodeGraph 内部维护一个 LRU 节点缓存（最大 1000 条），加速 `getNodeById` 查询：
+
+```
+命中率 = hits / (hits + misses) × 100%
+```
+
+| 命中率范围 | 状态 | 说明 |
+|-----------|------|------|
+| ≥ 70% | 🟢 正常 | 图遍历会多次访问同一节点，命中率自然较高 |
+| 40-70% | 🟡 一般 | 查询模式较分散，或项目较小 |
+| < 40% | 🔴 偏低 | 可能工作集超出缓存容量 |
+
+> 详细的实现方案和数据格式，请参见 [`docs/usage-stats-and-dashboard.md`](docs/usage-stats-and-dashboard.md)。
 
 ## 支持的语言
 

@@ -1464,6 +1464,40 @@ program
     }
   });
 
+/**
+ * codegraph dashboard
+ */
+program
+  .command('dashboard')
+  .description('Start the CodeGraph usage dashboard (web UI)')
+  .option('-p, --port <number>', 'HTTP port for the dashboard server', '7890')
+  .action(async (options: { port?: string }) => {
+    const port = parseInt(options.port || '7890', 10);
+    if (isNaN(port) || port < 1 || port > 65535) {
+      error('Invalid port number. Must be between 1 and 65535.');
+      process.exit(1);
+    }
+
+    try {
+      const { DashboardServer } = await import('../dashboard/index');
+      const server = new DashboardServer(port);
+      await server.start();
+
+      // Keep process running until interrupted
+      process.on('SIGINT', () => {
+        server.stop();
+        process.exit(0);
+      });
+      process.on('SIGTERM', () => {
+        server.stop();
+        process.exit(0);
+      });
+    } catch (err) {
+      error(`Failed to start dashboard: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
 // Parse and run
 program.parse();
 
