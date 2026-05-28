@@ -403,6 +403,63 @@ export class QueryBuilder {
   }
 
   /**
+   * Pre-warm the node cache with the most connected nodes in the graph.
+   * For small projects (≤500 nodes), all nodes are loaded.
+   * For larger projects, the top N nodes by edge count are loaded.
+   *
+   * @param limit - Maximum number of nodes to pre-warm (default: auto based on project size)
+   * @returns Number of nodes actually loaded into cache
+   */
+  warmCache(limit?: number): number {
+    try {
+      // Determine total node count
+      const countStmt = this.db.prepare('SELECT COUNT(*) AS cnt FROM nodes');
+      const countRow = countStmt.get() as { cnt: number } | undefined;
+      const totalNodes = countRow?.cnt ?? 0;
+
+      if (totalNodes === 0) {
+        return 0;
+      }
+
+      let rows: NodeRow[];
+
+      if (limit === undefined && totalNodes <= 500) {
+        // Small project with no explicit limit: load all nodes
+        const stmt = this.db.prepare('SELECT * FROM nodes');
+        rows = stmt.all() as NodeRow[];
+      } else {
+        // Larger project or explicit limit: load top N by connectivity
+        const effectiveLimit = limit ?? 500;
+        const stmt = this.db.prepare(`
+          SELECT n.* FROM nodes n
+          LEFT JOIN (
+            SELECT source AS node_id, COUNT(*) AS cnt FROM edges GROUP BY source
+            UNION ALL
+            SELECT target AS node_id, COUNT(*) AS cnt FROM edges GROUP BY target
+          ) e ON n.id = e.node_id
+          GROUP BY n.id
+          ORDER BY COALESCE(SUM(e.cnt), 0) DESC
+          LIMIT ?
+        `);
+        rows = stmt.all(effectiveLimit) as NodeRow[];
+      }
+
+      // Populate cache without affecting hit/miss counters
+      let warmed = 0;
+      for (const row of rows) {
+        const node = rowToNode(row);
+        this.cacheNode(node);
+        warmed++;
+      }
+
+      return warmed;
+    } catch {
+      // Cache warmup failure must never block open()
+      return 0;
+    }
+  }
+
+  /**
    * Clear the node cache
    */
   clearCache(): void {

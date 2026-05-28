@@ -49,6 +49,7 @@ import { GraphTraverser, GraphQueryManager } from './graph';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions } from './sync';
+import { debugLog } from './mcp/debug-log';
 
 // Re-export types for consumers
 export * from './types';
@@ -253,6 +254,12 @@ export class CodeGraph {
 
     const instance = new CodeGraph(db, queries, resolvedRoot);
 
+    // Pre-warm the node cache with high-connectivity nodes
+    const warmStart = performance.now();
+    const warmedCount = queries.warmCache();
+    const warmMs = performance.now() - warmStart;
+    debugLog('cache', `Cache warmup complete`, { warmedCount, elapsedMs: Math.round(warmMs * 100) / 100, project: resolvedRoot });
+
     // Sync if requested
     if (options.sync) {
       await instance.sync();
@@ -283,7 +290,15 @@ export class CodeGraph {
     const db = DatabaseConnection.open(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    return new CodeGraph(db, queries, resolvedRoot);
+    const instance = new CodeGraph(db, queries, resolvedRoot);
+
+    // Pre-warm the node cache with high-connectivity nodes
+    const warmStart = performance.now();
+    const warmedCount = queries.warmCache();
+    const warmMs = performance.now() - warmStart;
+    debugLog('cache', `Cache warmup complete`, { warmedCount, elapsedMs: Math.round(warmMs * 100) / 100, project: resolvedRoot });
+
+    return instance;
   }
 
   /**
