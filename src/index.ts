@@ -577,6 +577,13 @@ export class CodeGraph {
     return this.db.getJournalMode();
   }
 
+  /**
+   * Get node-cache hit/miss statistics for session usage reporting.
+   */
+  getCacheStats(): { hits: number; misses: number; size: number; maxSize: number } {
+    return this.queries.getCacheStats();
+  }
+
   // ===========================================================================
   // Node Operations
   // ===========================================================================

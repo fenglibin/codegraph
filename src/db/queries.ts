@@ -150,6 +150,10 @@ export class QueryBuilder {
   private nodeCache: Map<string, Node> = new Map();
   private readonly maxCacheSize = 1000;
 
+  // Cache hit/miss counters for session statistics
+  private cacheHits = 0;
+  private cacheMisses = 0;
+
   // Prepared statements (lazily initialized)
   private stmts: {
     insertNode?: SqliteStatement;
@@ -361,12 +365,15 @@ export class QueryBuilder {
   getNodeById(id: string): Node | null {
     // Check cache first
     if (this.nodeCache.has(id)) {
+      this.cacheHits++;
       const cached = this.nodeCache.get(id)!;
       // Move to end to implement LRU (delete and re-add)
       this.nodeCache.delete(id);
       this.nodeCache.set(id, cached);
       return cached;
     }
+
+    this.cacheMisses++;
 
     if (!this.stmts.getNodeById) {
       this.stmts.getNodeById = this.db.prepare('SELECT * FROM nodes WHERE id = ?');
@@ -400,6 +407,18 @@ export class QueryBuilder {
    */
   clearCache(): void {
     this.nodeCache.clear();
+  }
+
+  /**
+   * Get node cache statistics for session usage reporting.
+   */
+  getCacheStats(): { hits: number; misses: number; size: number; maxSize: number } {
+    return {
+      hits: this.cacheHits,
+      misses: this.cacheMisses,
+      size: this.nodeCache.size,
+      maxSize: this.maxCacheSize,
+    };
   }
 
   /**

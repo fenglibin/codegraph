@@ -684,6 +684,18 @@ export const tools: ToolDefinition[] = [
 ];
 
 /**
+ * Per-tool usage statistics collected in memory during a server session.
+ * Reset on process restart.
+ */
+export interface ToolStats {
+  count: number;
+  errors: number;
+  totalMs: number;
+  minMs: number;
+  maxMs: number;
+}
+
+/**
  * Tool handler that executes tools against a CodeGraph instance
  *
  * Supports cross-project queries via the projectPath parameter.
@@ -695,6 +707,10 @@ export class ToolHandler {
   // The directory the server last searched for a default project. Surfaced in
   // the "not initialized" error so users can see why detection missed.
   private defaultProjectHint: string | null = null;
+
+  // Session usage statistics (in-memory, reset on restart)
+  private stats: Map<string, ToolStats> = new Map();
+  private startedAt: number = Date.now();
 
   constructor(private cg: CodeGraph | null) {}
 
@@ -823,6 +839,33 @@ export class ToolHandler {
   }
 
   /**
+   * Record a tool call for session usage statistics.
+   */
+  private recordCall(toolName: string, elapsedMs: number, isError: boolean): void {
+    let s = this.stats.get(toolName);
+    if (!s) {
+      s = { count: 0, errors: 0, totalMs: 0, minMs: Infinity, maxMs: 0 };
+      this.stats.set(toolName, s);
+    }
+    s.count++;
+    if (isError) s.errors++;
+    s.totalMs += elapsedMs;
+    if (elapsedMs < s.minMs) s.minMs = elapsedMs;
+    if (elapsedMs > s.maxMs) s.maxMs = elapsedMs;
+  }
+
+  /**
+   * Get session usage statistics for testing and programmatic access.
+   */
+  getSessionStats(): { startedAt: number; tools: Map<string, ToolStats> } {
+    const copy = new Map<string, ToolStats>();
+    for (const [k, v] of this.stats) {
+      copy.set(k, { ...v });
+    }
+    return { startedAt: this.startedAt, tools: copy };
+  }
+
+  /**
    * Validate that a value is a non-empty string
    */
   private validateString(value: unknown, name: string): string | ToolResult {
@@ -849,11 +892,24 @@ export class ToolHandler {
    * and concentrates cross-cutting concerns here.
    */
   async execute(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    const t0 = performance.now();
     let result: ToolResult;
+    let isError = false;
     try {
       result = await this.dispatch(toolName, args);
+      isError = !!result.isError;
     } catch (err) {
-      return this.errorResult(`Tool execution failed: ${err instanceof Error ? err.message : String(err)}`);
+      isError = true;
+      result = this.errorResult(`Tool execution failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Record session usage statistics
+    const elapsed = performance.now() - t0;
+    this.recordCall(toolName, elapsed, isError);
+
+    // Early return for errors — no footer needed
+    if (isError) {
+      return result;
     }
 
     // Footer injection: skip status (which is itself the freshness
@@ -861,7 +917,7 @@ export class ToolHandler {
     // adds noise rather than signal). Resolution failures of getCodeGraph
     // are tolerated — the footer simply degrades to '' so we never
     // surface a confusing partial signal.
-    if (TOOLS_SKIP_INDEX_AGE.has(toolName) || result.isError) {
+    if (TOOLS_SKIP_INDEX_AGE.has(toolName)) {
       return result;
     }
     try {
@@ -1704,6 +1760,54 @@ export class ToolHandler {
         lines.push(`- ${lang}: ${count}`);
       }
     }
+
+    // Session usage statistics
+    lines.push('', '### Session Usage (since server start)', '');
+    if (this.stats.size === 0) {
+      lines.push('_(no tool calls recorded yet)_');
+    } else {
+      lines.push('| Tool | Calls | Errors | Avg (ms) | Min (ms) | Max (ms) |');
+      lines.push('|------|-------|--------|----------|----------|----------|');
+
+      let totalCalls = 0;
+      let totalErrors = 0;
+
+      // Sort by call count descending
+      const sorted = [...this.stats.entries()].sort((a, b) => b[1].count - a[1].count);
+      for (const [tool, s] of sorted) {
+        const avg = s.count > 0 ? (s.totalMs / s.count).toFixed(1) : '—';
+        const min = s.minMs === Infinity ? '—' : s.minMs.toFixed(1);
+        const max = s.maxMs === 0 && s.count === 0 ? '—' : s.maxMs.toFixed(1);
+        lines.push(`| ${tool} | ${s.count} | ${s.errors} | ${avg} | ${min} | ${max} |`);
+        totalCalls += s.count;
+        totalErrors += s.errors;
+      }
+
+      lines.push(`| **Total** | **${totalCalls}** | **${totalErrors}** | — | — | — |`);
+    }
+
+    // Node cache hit rate
+    try {
+      const cache = cg.getCacheStats();
+      const total = cache.hits + cache.misses;
+      const hitRate = total > 0 ? ((cache.hits / total) * 100).toFixed(1) : '—';
+      lines.push('', `**Node cache:** ${cache.hits} hits / ${cache.misses} misses (${hitRate}% hit rate) | capacity: ${cache.size}/${cache.maxSize}`);
+    } catch {
+      // Cache stats are informational — never break status output
+    }
+
+    // Uptime
+    const uptimeMs = Date.now() - this.startedAt;
+    const uptimeSec = Math.floor(uptimeMs / 1000);
+    const hours = Math.floor(uptimeSec / 3600);
+    const minutes = Math.floor((uptimeSec % 3600) / 60);
+    const seconds = uptimeSec % 60;
+    const uptimeStr = hours > 0
+      ? `${hours}h ${minutes}m ${seconds}s`
+      : minutes > 0
+        ? `${minutes}m ${seconds}s`
+        : `${seconds}s`;
+    lines.push('', `**Uptime:** ${uptimeStr}`);
 
     return this.textResult(lines.join('\n'));
   }
