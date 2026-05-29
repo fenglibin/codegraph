@@ -738,6 +738,183 @@ program
   });
 
 /**
+ * codegraph docs <subcommand>
+ *
+ * Document search and indexing commands.
+ */
+const docsCmd = program
+  .command('docs')
+  .description('Document search and indexing (full-text search over .md/.txt files)');
+
+docsCmd
+  .command('init [path]')
+  .description('Index all project documents (.md, .txt)')
+  .action(async (pathArg: string | undefined) => {
+    const projectPath = resolveProjectPath(pathArg);
+
+    try {
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}. Run 'codegraph init' first.`);
+        process.exit(1);
+      }
+
+      const { default: CodeGraph } = await loadCodeGraph();
+      const { DocumentIndexer } = await import('../documents/indexer');
+      const cg = await CodeGraph.open(projectPath);
+
+      const clack = await importESM('@clack/prompts');
+      clack.intro('Indexing project documents');
+
+      const indexer = new DocumentIndexer(cg.getDb(), projectPath);
+      indexer.initSchema();
+      const result = indexer.indexAll();
+
+      clack.log.success(`Indexed ${formatNumber(result.filesIndexed)} files into ${formatNumber(result.chunksCreated)} chunks`);
+      if (result.filesSkipped > 0) {
+        clack.log.warn(`Skipped ${result.filesSkipped} unreadable files`);
+      }
+      clack.log.info(`Duration: ${formatDuration(result.durationMs)}`);
+      clack.outro('Done');
+      cg.destroy();
+    } catch (err) {
+      error(`Failed to index documents: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+docsCmd
+  .command('sync [path]')
+  .description('Incremental update of document index')
+  .action(async (pathArg: string | undefined) => {
+    const projectPath = resolveProjectPath(pathArg);
+
+    try {
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}. Run 'codegraph init' first.`);
+        process.exit(1);
+      }
+
+      const { default: CodeGraph } = await loadCodeGraph();
+      const { DocumentIndexer } = await import('../documents/indexer');
+      const cg = await CodeGraph.open(projectPath);
+
+      const indexer = new DocumentIndexer(cg.getDb(), projectPath);
+      if (!indexer.isInitialized()) {
+        error('Document index not initialized. Run `codegraph docs init` first.');
+        cg.destroy();
+        process.exit(1);
+      }
+
+      const clack = await importESM('@clack/prompts');
+      clack.intro('Syncing document index');
+
+      const result = indexer.sync();
+      const totalChanges = result.filesAdded + result.filesUpdated + result.filesRemoved;
+
+      if (totalChanges === 0) {
+        clack.log.info('Documents already up to date');
+      } else {
+        clack.log.success(`Synced documents: ${result.filesAdded} added, ${result.filesUpdated} updated, ${result.filesRemoved} removed`);
+        clack.log.info(`Total chunks: ${formatNumber(result.chunksTotal)}`);
+      }
+
+      clack.outro('Done');
+      cg.destroy();
+    } catch (err) {
+      error(`Failed to sync documents: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+docsCmd
+  .command('search <query>')
+  .description('Search documents by keyword (debug/testing)')
+  .option('-l, --limit <n>', 'Max results', '5')
+  .action(async (query: string, options: { limit: string }) => {
+    const projectPath = resolveProjectPath(undefined);
+
+    try {
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}`);
+        process.exit(1);
+      }
+
+      const { default: CodeGraph } = await loadCodeGraph();
+      const { DocumentQueries } = await import('../documents/queries');
+      const cg = await CodeGraph.open(projectPath);
+
+      const queries = new DocumentQueries(cg.getDb());
+      if (!queries.isInitialized()) {
+        error('Document index not initialized. Run `codegraph docs init` first.');
+        cg.destroy();
+        process.exit(1);
+      }
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const results = queries.search(query, limit);
+
+      if (results.length === 0) {
+        console.log(`No results for "${query}"`);
+      } else {
+        console.log(`\nSearch results for "${query}" (${results.length} found):\n`);
+        for (const r of results) {
+          const title = r.title ? ` > ${r.title}` : '';
+          console.log(`  ${colors.cyan}${r.path}${title}${colors.reset} (lines ${r.startLine}-${r.endLine})`);
+          // Show first 3 lines of content
+          const preview = r.content.split('\n').slice(0, 3).join('\n    ');
+          console.log(`    ${colors.dim}${preview}${colors.reset}\n`);
+        }
+      }
+
+      cg.destroy();
+    } catch (err) {
+      error(`Search failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+docsCmd
+  .command('status [path]')
+  .description('Show document index status')
+  .action(async (pathArg: string | undefined) => {
+    const projectPath = resolveProjectPath(pathArg);
+
+    try {
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}`);
+        process.exit(1);
+      }
+
+      const { default: CodeGraph } = await loadCodeGraph();
+      const { DocumentIndexer } = await import('../documents/indexer');
+      const cg = await CodeGraph.open(projectPath);
+
+      const indexer = new DocumentIndexer(cg.getDb(), projectPath);
+      if (!indexer.isInitialized()) {
+        console.log('Document index: not initialized');
+        console.log('Run `codegraph docs init` to index project documents.');
+        cg.destroy();
+        return;
+      }
+
+      const status = indexer.getStatus();
+      console.log(`\nDocument Index Status:`);
+      console.log(`  Files indexed: ${formatNumber(status.fileCount)}`);
+      console.log(`  Total chunks:  ${formatNumber(status.chunkCount)}`);
+      if (status.lastUpdatedAt) {
+        const ago = Date.now() - status.lastUpdatedAt;
+        const agoStr = ago < 60000 ? `${Math.round(ago / 1000)}s ago` : formatDuration(ago) + ' ago';
+        console.log(`  Last updated:  ${agoStr}`);
+      }
+
+      cg.destroy();
+    } catch (err) {
+      error(`Failed to get status: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
  * codegraph status [path]
  */
 program

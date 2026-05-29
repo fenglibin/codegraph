@@ -21,6 +21,7 @@ import {
 import { clamp, validatePathWithinRoot } from '../utils';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { DocumentQueries } from '../documents/queries';
 
 /** Maximum output length to prevent context bloat (characters) */
 const MAX_OUTPUT_LENGTH = 15000;
@@ -698,6 +699,38 @@ export const tools: ToolDefinition[] = [
       },
     },
   },
+  {
+    name: 'codegraph_docs',
+    description: 'Search and browse project documentation (.md, .txt files). Use this instead of Read when you need information from project docs. Three modes: "search" finds relevant sections by keyword; "outline" shows document structure (headings tree); "read" retrieves a specific section by path and title.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          description: 'search: FTS keyword search across all docs. outline: show heading structure of one or all docs. read: get full content of a specific section.',
+          enum: ['search', 'outline', 'read'],
+        },
+        query: {
+          type: 'string',
+          description: 'Search keywords (required for mode=search)',
+        },
+        path: {
+          type: 'string',
+          description: "Document path filter (optional for outline/read, e.g. 'docs/deploy.md')",
+        },
+        section: {
+          type: 'string',
+          description: "Section heading to read (for mode=read, e.g. 'Getting Started')",
+        },
+        limit: {
+          type: 'number',
+          description: 'Max results for search mode (default: 5)',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['mode'],
+    },
+  },
 ];
 
 /**
@@ -1036,6 +1069,8 @@ export class ToolHandler {
         return await this.handleFiles(args);
       case 'codegraph_usage':
         return await this.handleUsage(args);
+      case 'codegraph_docs':
+        return await this.handleDocs(args);
       default:
         return this.errorResult(`Unknown tool: ${toolName}`);
     }
@@ -2569,6 +2604,102 @@ export class ToolHandler {
 
   private formatTaskContext(context: TaskContext): string {
     return context.summary || 'No context found';
+  }
+
+  /**
+   * Handle codegraph_docs — document search/outline/read
+   */
+  private async handleDocs(args: Record<string, unknown>): Promise<ToolResult> {
+    const mode = args.mode as string;
+    if (!mode || !['search', 'outline', 'read'].includes(mode)) {
+      return this.errorResult('mode must be one of: search, outline, read');
+    }
+
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const db = cg.getDb();
+
+    // Check if doc tables are initialized
+    const queries = new DocumentQueries(db);
+    if (!queries.isInitialized()) {
+      return this.errorResult(
+        'Document index not initialized. Run `codegraph docs init` first to index project documentation.'
+      );
+    }
+
+    switch (mode) {
+      case 'search': {
+        const query = args.query as string;
+        if (!query || typeof query !== 'string' || query.trim().length === 0) {
+          return this.errorResult('query is required for mode=search');
+        }
+        const limit = typeof args.limit === 'number' ? args.limit : 5;
+        const results = queries.search(query, limit);
+
+        if (results.length === 0) {
+          return this.textResult(`## Search Results for "${query}"\n\nNo results found.`);
+        }
+
+        const lines: string[] = [`## Search Results for "${query}"\n`];
+        for (const r of results) {
+          const heading = r.title ? ` > ${r.title}` : '';
+          lines.push(`### ${r.path}${heading} (lines ${r.startLine}-${r.endLine})`);
+          // Truncate content to ~500 chars to avoid context bloat
+          const snippet = r.content.length > 500 ? r.content.slice(0, 500) + '\n...' : r.content;
+          lines.push(snippet);
+          lines.push('');
+        }
+        lines.push(`---\nFound ${results.length} result${results.length > 1 ? 's' : ''}.`);
+        return this.textResult(lines.join('\n'));
+      }
+
+      case 'outline': {
+        const docPath = args.path as string | undefined;
+        const entries = queries.outline(docPath);
+
+        if (entries.length === 0) {
+          const msg = docPath
+            ? `No headings found in "${docPath}".`
+            : 'No document headings found. Ensure documents have been indexed with `codegraph docs init`.';
+          return this.textResult(`## Document Structure\n\n${msg}`);
+        }
+
+        const lines: string[] = ['## Document Structure\n'];
+        let currentPath = '';
+        for (const e of entries) {
+          if (e.path !== currentPath) {
+            currentPath = e.path;
+            lines.push(`### ${currentPath}`);
+          }
+          const indent = '  '.repeat(Math.max(0, e.headingLevel - 1));
+          const prefix = '#'.repeat(e.headingLevel);
+          lines.push(`${indent}- ${prefix} ${e.title || '(untitled)'} (line ${e.startLine})`);
+        }
+        return this.textResult(lines.join('\n'));
+      }
+
+      case 'read': {
+        const docPath = args.path as string;
+        if (!docPath || typeof docPath !== 'string') {
+          return this.errorResult('path is required for mode=read');
+        }
+        const section = args.section as string | undefined;
+        const result = queries.read(docPath, section);
+
+        if (!result) {
+          const msg = section
+            ? `Section "${section}" not found in "${docPath}".`
+            : `Document "${docPath}" not found in index.`;
+          return this.errorResult(msg);
+        }
+
+        const heading = result.title ? ` > ${result.title}` : '';
+        const header = `## ${result.path}${heading} (lines ${result.startLine}-${result.endLine})\n`;
+        return this.textResult(header + '\n' + result.content);
+      }
+
+      default:
+        return this.errorResult(`Unknown mode: ${mode}`);
+    }
   }
 
   private textResult(text: string): ToolResult {

@@ -325,6 +325,14 @@ export class CodeGraph {
     return this.projectRoot;
   }
 
+  /**
+   * Get the underlying SQLite database instance.
+   * Used by document indexer/queries which operate on the same DB.
+   */
+  getDb(): import('./db/sqlite-adapter').SqliteDatabase {
+    return this.db.getDb();
+  }
+
   // ===========================================================================
   // Indexing
   // ===========================================================================
