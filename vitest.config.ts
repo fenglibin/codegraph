@@ -43,6 +43,13 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['__tests__/**/*.test.ts'],
+    // Several watcher / sync tests rely on real fs.watch events whose end-to-end
+    // latency on macOS FSEvents can be several hundred ms. The waitFor helpers
+    // inside those tests already cap at 5000–10000ms; make the vitest-level
+    // timeout strictly larger so we never see the confusing
+    // "Test timed out in 5000ms" error before the test's own waitFor times out
+    // and produces a more actionable message.
+    testTimeout: 15000,
     pool: 'forks',
     poolOptions: {
       forks: {

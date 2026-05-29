@@ -116,6 +116,25 @@ async function probeFsWatchUsable(): Promise<boolean> {
 
 let fsWatchUsable = true;
 
+/**
+ * Wait long enough for fs.watch({ recursive: true }) to actually attach its
+ * OS-level event stream before we start producing events.
+ *
+ * On macOS FSEvents (and to a lesser extent Linux inotify under Node ≥ 19),
+ * `fs.watch().start()` returns synchronously but the kernel-level subscription
+ * is set up asynchronously and can need several hundred milliseconds. Writing
+ * to the watched directory before that grace period silently drops the event,
+ * which makes single-write tests like "should trigger sync after file change"
+ * hang until the test-level timeout — even though production behavior is fine
+ * because real users always write files much later than test millisecond-scale
+ * timing.
+ *
+ * 200ms is conservative enough for CI hardware while keeping fast tests fast.
+ */
+async function waitForWatcherToSettle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 200));
+}
+
 describe('FileWatcher', () => {
   let testDir: string;
 
@@ -187,6 +206,8 @@ describe('FileWatcher', () => {
       const watcher = new FileWatcher(testDir, syncFn, { debounceMs: 200 });
 
       watcher.start();
+      // Let fs.watch attach its OS-level subscription before we write.
+      await waitForWatcherToSettle();
 
       // Create a new file
       fs.writeFileSync(path.join(testDir, 'src', 'new.ts'), 'export const y = 2;');
@@ -204,6 +225,8 @@ describe('FileWatcher', () => {
       const watcher = new FileWatcher(testDir, syncFn, { debounceMs: 500 });
 
       watcher.start();
+      // Let fs.watch attach its OS-level subscription before we write.
+      await waitForWatcherToSettle();
 
       // Rapid-fire changes
       for (let i = 0; i < 5; i++) {
@@ -279,6 +302,8 @@ describe('FileWatcher', () => {
       });
 
       watcher.start();
+      // Let fs.watch attach its OS-level subscription before we write.
+      await waitForWatcherToSettle();
 
       fs.writeFileSync(path.join(testDir, 'src', 'test.ts'), 'export const z = 3;');
 
@@ -298,6 +323,8 @@ describe('FileWatcher', () => {
       });
 
       watcher.start();
+      // Let fs.watch attach its OS-level subscription before we write.
+      await waitForWatcherToSettle();
 
       fs.writeFileSync(path.join(testDir, 'src', 'test.ts'), 'export const z = 3;');
 
@@ -367,6 +394,8 @@ describe('FileWatcher', () => {
       const initialNodes = initialStats.nodeCount;
 
       cg.watch({ debounceMs: 300 });
+      // Let fs.watch attach its OS-level subscription before we write.
+      await waitForWatcherToSettle();
 
       // Add a new file with a function
       fs.writeFileSync(
