@@ -9,6 +9,19 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Dashboard no longer shows the same project twice during the legacy-layout
+  transition window.** When a pre-0.10.8 `~/.codegraph/stats/<hash>.json` file
+  hadn't been migrated yet but a fresh `~/.codegraph/stats/<hash>/` per-session
+  directory already existed for the same project, `readAllStats()` emitted two
+  records — one per branch — with the same hash and project name but
+  different statistics (e.g. `codegraph_search` counted 11 in one row and 4
+  in the other, because each row only saw a subset of today's sessions).
+  `readAllStats()` now merges by hash before returning, so the dashboard
+  always shows exactly one row per project even while
+  `runStartupMaintenance` / `migrateLegacyFile` finish moving the legacy
+  file into the directory in the background.
+
 ## [0.10.8] - 2026-05-29
 
 ### Fixed

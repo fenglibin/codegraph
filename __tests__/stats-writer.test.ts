@@ -303,6 +303,59 @@ describe('StatsWriter', () => {
       expect(proj!.hash).toBe(hash);
       expect(proj!.sessionCount).toBe(1);
     });
+
+    // Regression: legacy 0.10.7-and-earlier <hash>.json could co-exist with
+    // the new 0.10.8 <hash>/ directory during the migration window. Before
+    // the dedupe fix, readAllStats emitted TWO records with the same hash
+    // and projectName but different stats — the dashboard rendered the
+    // same project twice with diverging numbers (e.g. search count 11 vs 4).
+    // After the fix, a single merged record is returned per hash.
+    it('merges legacy <hash>.json with same-hash <hash>/ directory into one record', () => {
+      const project = '/test/dual-layout';
+      const hash = projectHash(project);
+      const statsDir = join(tmpHome, '.codegraph', 'stats');
+      mkdirSync(statsDir, { recursive: true });
+
+      // (1) Per-session 0.10.8 file inside <hash>/ — written via StatsWriter
+      // so we exercise the same code path the dashboard sees in the wild.
+      const writer = new StatsWriter(project);
+      const dirSnapshot = makeSnapshot({ startedAt: Date.now() - 30_000 });
+      writer.scheduleWrite(dirSnapshot);
+      writer.flush();
+
+      // (2) Legacy top-level <hash>.json with TODAY's startedAt, simulating
+      // a pre-0.10.8 file that hasn't been migrated yet by maintenance.
+      const legacy: StatsFile = {
+        version: 1, project, projectName: 'dual-layout',
+        startedAt: Date.now() - 60_000,
+        updatedAt: Date.now() - 60_000,
+        tools: {
+          codegraph_search: { count: 11, errors: 0, totalMs: 22, minMs: 1, maxMs: 5 },
+          codegraph_status: { count: 3, errors: 0, totalMs: 3, minMs: 1, maxMs: 1 },
+        },
+        cache: { hits: 7, misses: 1, size: 50, maxSize: 1000 },
+      };
+      writeFileSync(join(statsDir, `${hash}.json`), JSON.stringify(legacy));
+
+      const all = readAllStats();
+      const matching = all.filter(s => s.hash === hash);
+
+      // Single record per hash — the bug was two.
+      expect(matching).toHaveLength(1);
+
+      const merged = matching[0]!;
+      // Both sources contribute to sessionCount (1 dir session + 1 legacy file).
+      expect(merged.sessionCount).toBe(2);
+      // codegraph_search comes ONLY from the legacy file (count = 11) plus
+      // the makeSnapshot() value (count = 3) — must be summed, not picked.
+      expect(merged.tools.codegraph_search!.count).toBe(11 + 3);
+      // codegraph_context comes ONLY from the dir session (count = 5).
+      expect(merged.tools.codegraph_context!.count).toBe(5);
+      // codegraph_status comes ONLY from the legacy file (count = 3).
+      expect(merged.tools.codegraph_status!.count).toBe(3);
+      // Cache hits sum across both sources (42 from snapshot + 7 from legacy).
+      expect(merged.cache.hits).toBe(42 + 7);
+    });
   });
 
   describe('readSessionsForProject()', () => {

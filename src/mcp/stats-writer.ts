@@ -541,13 +541,20 @@ export function runStartupMaintenance(): void {
  * a StatsWriter (e.g. when the dashboard is opened before any new MCP
  * session has run): they are treated as a single-session record, again
  * filtered to today only.
+ *
+ * Hash dedupe: when both a `<hash>/` directory and a top-level
+ * `<hash>.json` exist for the same project (the transition window between
+ * the legacy 0.10.7 layout and the 0.10.8 per-session layout), both
+ * sources are merged into a single AggregatedStats — never two rows for
+ * the same project. This keeps the dashboard honest while
+ * `runStartupMaintenance` / `migrateLegacyFile` finish moving the legacy
+ * file into the directory in the background.
  */
 export function readAllStats(): AggregatedStats[] {
   const statsDir = getStatsDir();
   if (!existsSync(statsDir)) return [];
 
   const today = toDateString(Date.now());
-  const out: AggregatedStats[] = [];
 
   let entries: string[];
   try {
@@ -555,6 +562,21 @@ export function readAllStats(): AggregatedStats[] {
   } catch {
     return [];
   }
+
+  // Collect today's StatsFiles per hash from BOTH the directory branch
+  // (per-session 0.10.8 layout) and the top-level legacy file branch.
+  // Same hash on both sides means same project — merge them.
+  const sessionsByHash = new Map<string, StatsFile[]>();
+
+  const addSessions = (hash: string, sessions: StatsFile[]): void => {
+    if (sessions.length === 0) return;
+    const existing = sessionsByHash.get(hash);
+    if (existing) {
+      existing.push(...sessions);
+    } else {
+      sessionsByHash.set(hash, sessions);
+    }
+  };
 
   for (const entry of entries) {
     if (entry === HISTORY_DIR_NAME) continue;
@@ -564,11 +586,10 @@ export function readAllStats(): AggregatedStats[] {
     try { st = statSync(full); } catch { continue; }
 
     if (st.isDirectory() && HASH_RE.test(entry)) {
-      const allSessions = readSessionFiles(full);
-      const todaysSessions = allSessions.filter(s => toDateString(s.startedAt) === today);
-      if (todaysSessions.length === 0) continue;
-      const agg = aggregateSessions(todaysSessions);
-      out.push({ ...agg, hash: entry, sessionCount: todaysSessions.length });
+      const todaysSessions = readSessionFiles(full).filter(
+        s => toDateString(s.startedAt) === today
+      );
+      addSessions(entry, todaysSessions);
     } else if (st.isFile() && entry.endsWith('.json') && !entry.endsWith('.tmp')) {
       // Legacy <hash>.json — surface it only if it represents today's data,
       // matching the directory branch above. Pre-today legacy files become
@@ -579,11 +600,16 @@ export function readAllStats(): AggregatedStats[] {
         const parsed = JSON.parse(readFileSync(full, 'utf8')) as StatsFile;
         if (parsed.version !== 1) continue;
         if (toDateString(parsed.startedAt) !== today) continue;
-        out.push({ ...parsed, hash, sessionCount: 1 });
+        addSessions(hash, [parsed]);
       } catch { /* skip */ }
     }
   }
 
+  const out: AggregatedStats[] = [];
+  for (const [hash, sessions] of sessionsByHash) {
+    const agg = aggregateSessions(sessions);
+    out.push({ ...agg, hash, sessionCount: sessions.length });
+  }
   return out;
 }
 
