@@ -357,7 +357,51 @@ sync 流程:
 4. FTS5 索引通过触发器自动同步
 ```
 
-### 2.8 与代码索引的隔离
+### 2.8 自动同步策略（事件总线模式）
+
+文档索引的自动更新采用**事件总线模式**，与代码自动索引完全解耦：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              fs.watch (单一递归 watcher, 共用)                     │
+└────────────────────────┬────────────────────────────────────────┘
+                         │ filename change event
+                         ▼
+              ┌──── classifyFile() ────┐
+              │         │              │
+        'source'      'doc'         'other'
+              │         │              │
+              ▼         ▼              (忽略)
+    Code Subscriber  Doc Subscriber
+    ─────────────    ──────────────
+    debounce: 2000ms debounce: 500ms
+    tree-sitter 解析  hash + 分块
+    indexMutex 锁     无需 mutex
+    重操作 (~100ms+)  轻操作 (<5ms)
+```
+
+**关键设计决策**：
+
+| 维度 | 说明 |
+|------|------|
+| **单一 OS watcher** | 不多开 fs.watch，避免 inode/fd 浪费 |
+| **文件分类** | `isSourceFile()` → source, `isDocFile() && !isDocExcluded()` → doc |
+| **独立 debounce** | 代码 2000ms（避免连续保存抖动），文档 500ms（单次编辑即更新） |
+| **独立 flush** | 各自维护 syncing 状态，互不阻塞等待 |
+| **独立容错** | 文档 sync 异常不影响代码索引，反之亦然 |
+| **自动激活** | `codegraph docs init` 后，下次 `watch()` 自动注册 doc subscriber |
+| **优雅降级** | 未初始化文档索引时不注册 doc subscriber，零开销 |
+
+**实现位置**：
+- `src/sync/watcher.ts` — `FileWatcher` 类（事件分发 + subscriber 管理）
+- `src/index.ts` — `CodeGraph.watch()` 方法（注册 doc subscriber）
+
+**与手动同步的关系**：
+- `codegraph docs sync`（CLI）仍然可用，用于首次索引后的手动触发
+- 自动同步在 MCP server 运行期间生效（`watch()` 在 server 启动时调用）
+- 两者使用相同的 `DocumentIndexer.sync()` 方法，逻辑完全一致
+
+### 2.9 与代码索引的隔离
 
 | 维度 | 代码索引 | 文档索引 |
 |------|---------|---------|
@@ -439,7 +483,7 @@ sync 流程:
 | `.rst` / `.adoc` 支持 | 复杂度高，用户少 | v2 按需添加 |
 | 文档 ↔ 代码符号关联 | 增加耦合、成本高 | 评估后决定 |
 | 语义向量搜索 | 需要 embedding 模型，违反"无外部依赖" | 长远可选 |
-| 自动 file watcher | 增加 watcher 复杂度 | v2 评估复用现有 watcher |
+| ~~自动 file watcher~~ | ~~增加 watcher 复杂度~~ | ✅ 已实现（事件总线模式，§2.8） |
 | 搜索结果返回相邻 chunk | 增加 token 返回量 | 观察实际使用后决定 |
 | 文档预热缓存 | FTS5 查询已经很快(<5ms)，预热无必要 | 不需要 |
 

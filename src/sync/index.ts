@@ -5,14 +5,15 @@
  * up-to-date with file system changes.
  *
  * Components:
- * - FileWatcher: Debounced fs.watch that auto-triggers sync on file changes
+ * - FileWatcher: Event-bus watcher that dispatches categorized file changes
+ *   to independent subscribers (code sync, doc sync) with separate debounce
  * - Watch policy: decides when the watcher must be disabled (e.g. WSL2 /mnt)
  * - Git sync hooks: opt-in commit/merge/checkout hooks when watching is off
  * - Content hashing for change detection (in extraction module)
  * - Incremental reindexing (in extraction module)
  */
 
-export { FileWatcher, WatchOptions } from './watcher';
+export { FileWatcher, WatchOptions, SyncSubscriber, FileChangeKind, FileChangeEvent } from './watcher';
 export { watchDisabledReason, detectWsl } from './watch-policy';
 export {
   installGitSyncHook,

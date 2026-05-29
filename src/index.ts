@@ -49,6 +49,7 @@ import { GraphTraverser, GraphQueryManager } from './graph';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions } from './sync';
+import { DocumentIndexer } from './documents/indexer';
 import { debugLog } from './mcp/debug-log';
 
 // Re-export types for consumers
@@ -492,6 +493,29 @@ export class CodeGraph {
       },
       options
     );
+
+    // Register doc sync subscriber (independent debounce, isolated errors)
+    const docIndexer = new DocumentIndexer(this.db.getDb(), this.projectRoot);
+    if (docIndexer.isInitialized()) {
+      this.watcher.addSubscriber({
+        kinds: ['doc'],
+        debounceMs: 500,
+        syncFn: async () => {
+          const start = performance.now();
+          const result = docIndexer.sync();
+          const filesChanged = result.filesAdded + result.filesUpdated + result.filesRemoved;
+          return { filesChanged, durationMs: Math.round(performance.now() - start) };
+        },
+        onSyncComplete: (result) => {
+          if (result.filesChanged > 0) {
+            debugLog('doc-sync', `Auto-synced ${result.filesChanged} doc(s) in ${result.durationMs}ms`, { project: this.projectRoot });
+          }
+        },
+        onSyncError: (err) => {
+          debugLog('doc-sync', `Doc sync error: ${err.message}`, { project: this.projectRoot }, 'WARN');
+        },
+      });
+    }
 
     return this.watcher.start();
   }

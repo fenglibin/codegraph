@@ -304,6 +304,40 @@
 
 ---
 
+## Task 11：文档自动同步（事件总线模式）
+
+**文件**：`src/sync/watcher.ts`（重构）、`src/index.ts`（修改）
+
+**要求**：
+1. 将 `FileWatcher` 重构为事件总线模式：
+   - 新增文件分类函数 `classifyFile(path)` → `'source' | 'doc' | 'other'`
+   - 新增 `SyncSubscriber` 接口（kinds, debounceMs, syncFn, onSyncComplete, onSyncError）
+   - 新增 `addSubscriber(subscriber)` 方法
+   - 每个 subscriber 拥有独立的 debounce timer 和 flush 状态
+   - 保持原有 code sync 逻辑作为 legacy 路径（向后兼容）
+2. 在 `CodeGraph.watch()` 中注册 doc sync subscriber：
+   - 检查 `DocumentIndexer.isInitialized()` — 未初始化则不注册
+   - debounceMs = 500（文档编辑通常单次保存即需更新）
+   - syncFn 调用 `DocumentIndexer.sync()`
+   - 错误隔离：doc sync 异常不影响 code sync
+
+**设计原则**：
+- 单一 OS watcher（不额外消耗 fd/inode）
+- 独立 debounce（代码 2000ms，文档 500ms）
+- 独立容错（互不阻塞、互不传播异常）
+- 自动激活（`codegraph docs init` 后下次 watch() 自动注册）
+
+**验收标准**：
+- 修改 .md 文件后 500ms 内自动触发文档 sync
+- 修改 .ts 文件不触发文档 sync
+- 文档 sync 失败不影响代码 sync
+- 代码 sync 执行期间文档 sync 不被阻塞
+- 原有 watcher 测试全部通过
+
+**依赖**：Task 2, Task 4
+
+---
+
 ## Task 10：构建与验证
 
 **操作**：
@@ -327,10 +361,10 @@ Task 2 (排除规则) ──┐              ├──▶ Task 5 (查询层) ─
 Task 3 (分块器) ──┐ │              │                        ├──▶ Task 7 (CLI)
                   ▼ ▼              │                        │
               Task 4 (索引器) ─────┘                        │
-                                                            ▼
-                                                     Task 9 (测试)
-                                                            │
-                                                            ▼
+                  │                                         ▼
+                  ├──────────────────────────────────▶ Task 9 (测试)
+                  │                                         │
+                  └──▶ Task 11 (自动同步)                    ▼
                                                      Task 10 (验证)
 ```
 
@@ -339,6 +373,7 @@ Task 3 (分块器) ──┐ │              │                        ├─�
 **可并行**：
 - Task 1, 2, 3 无依赖，可并行开发
 - Task 7, 8 可在 Task 6 之后并行
+- Task 11 可在 Task 4 之后独立开发
 
 ---
 
