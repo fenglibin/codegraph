@@ -9,6 +9,53 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.8] - 2026-05-29
+
+### Fixed
+- **Dashboard "View History" no longer always shows "No history data yet"**.
+  The dashboard front-end was hashing the project path with a small djb2-style
+  function while the MCP server wrote files keyed by `SHA-256(path)[:12]`, so
+  every `/api/history/<hash>` request hit a hash that didn't match any file
+  on disk. The dashboard now uses the authoritative hash returned by the
+  server (new `hash` field on `/api/stats`), so View History — and the new
+  View Sessions panel — load correctly for every project.
+
+### Changed
+- **Per-session stats files — same-day sessions no longer overwrite each
+  other.** Disk layout for usage stats is now
+  `~/.codegraph/stats/<hash>/<startedAt>_<pid>.json` (one file per MCP
+  session) instead of a single `~/.codegraph/stats/<hash>.json` that the
+  most recent session clobbered. If you opened 4 Claude Code sessions for
+  the same project today, the dashboard now sums all 4 into the summary
+  and lets you drill into each one via **View Sessions**. Cross-day
+  rollover still archives yesterday's sessions into a single
+  `history/<hash>_YYYY-MM-DD.json` rollup (unchanged 30-day retention).
+
+  Legacy `~/.codegraph/stats/<hash>.json` files from 0.10.7 and earlier
+  are migrated automatically the first time an MCP server starts for that
+  project — no manual cleanup needed. The dashboard also tolerates
+  unmigrated legacy files so you don't see a blank screen between the
+  upgrade and your next session. On dashboard startup, a maintenance pass
+  also migrates loose legacy files and archives yesterday's session files
+  for projects you haven't reopened — so stale data doesn't linger.
+
+- **`codegraph_usage` MCP tool now reports today's cumulative numbers per
+  project** (was: most recent session only). The "Uptime" column for the
+  current scope now spans the time from the day's first session start to
+  the most recent update, instead of a single session's duration. Daily
+  rollups under `scope: history` are unchanged.
+
+### Added
+- **Dashboard "View Sessions" panel**: per-session breakdown for each
+  project showing start time, duration, calls, errors, and cache hit rate
+  for every MCP server lifetime today.
+- **`Sessions Today` summary tile** on the dashboard, counting how many
+  distinct MCP server lifetimes have reported stats today across all
+  projects.
+- New `GET /api/sessions/:hash` endpoint returning the per-session detail
+  for one project. The `/api/stats` response now includes `hash` and
+  `sessionCount` fields per project.
+
 ## [0.10.1] - 2026-05-22
 
 ### Added
@@ -556,3 +603,4 @@ Thank you.
   ```
 
 [0.7.6]: https://github.com/colbymchenry/codegraph/releases/tag/v0.7.6
+[0.10.8]: https://github.com/colbymchenry/codegraph/releases/tag/v0.10.8

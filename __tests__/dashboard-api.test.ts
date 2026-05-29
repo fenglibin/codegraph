@@ -39,67 +39,87 @@ function writeStats(project: string, tools: StatsFile['tools'] = {}): void {
   writeFileSync(join(statsDir, `${hash}.json`), JSON.stringify(stats));
 }
 
+/** Write a per-session stats file under <hash>/<startedAt>_<pid>.json. */
+function writeSessionStats(project: string, startedAt: number, tools: StatsFile['tools'] = {}): void {
+  const hash = projectHash(project);
+  const projectDir = join(tmpHome, '.codegraph', 'stats', hash);
+  mkdirSync(projectDir, { recursive: true });
+  const stats: StatsFile = {
+    version: 1,
+    project,
+    projectName: project.split('/').pop()!,
+    startedAt,
+    updatedAt: startedAt + 30_000,
+    tools,
+    cache: { hits: 7, misses: 3, size: 10, maxSize: 1000 },
+  };
+  writeFileSync(join(projectDir, `${startedAt}_999.json`), JSON.stringify(stats));
+}
+
+/** Helper: spin up an ephemeral test server, hit one URL, return parsed body. */
+async function httpGet(url: string): Promise<{ status: number; body: any }> {
+  const http = await import('http');
+  const { handleApiRequest } = await import('../src/dashboard/api');
+  return new Promise((resolve) => {
+    const testServer = http.createServer((req, res) => {
+      handleApiRequest(req, res);
+      res.on('finish', () => testServer.close());
+    });
+    testServer.listen(0, () => {
+      const addr = testServer.address() as { port: number };
+      http.get(`http://localhost:${addr.port}${url}`, (res) => {
+        let data = '';
+        res.on('data', c => (data += c));
+        res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(data) }));
+      });
+    });
+  });
+}
+
 describe('Dashboard API', () => {
   it('GET /api/stats returns all projects', async () => {
     writeStats('/test/project-a', { codegraph_search: { count: 3, errors: 0, totalMs: 2.0, minMs: 0.5, maxMs: 1.0 } });
     writeStats('/test/project-b', { codegraph_context: { count: 7, errors: 1, totalMs: 10.0, minMs: 1.0, maxMs: 3.0 } });
 
-    const { DashboardServer } = await import('../src/dashboard/index');
-    const server = new DashboardServer(0); // port 0 = random available port
-
-    // Use the underlying http server directly
-    const http = await import('http');
-    const { handleApiRequest } = await import('../src/dashboard/api');
-
-    const result = await new Promise<{ status: number; body: any }>((resolve) => {
-      const testServer = http.createServer((req, res) => {
-        handleApiRequest(req, res);
-        res.on('finish', () => {
-          testServer.close();
-        });
-      });
-
-      testServer.listen(0, () => {
-        const addr = testServer.address() as { port: number };
-        http.get(`http://localhost:${addr.port}/api/stats`, (res) => {
-          let data = '';
-          res.on('data', c => data += c);
-          res.on('end', () => {
-            resolve({ status: res.statusCode!, body: JSON.parse(data) });
-          });
-        });
-      });
-    });
-
+    const result = await httpGet('/api/stats');
     expect(result.status).toBe(200);
     expect(result.body).toHaveLength(2);
     expect(result.body.map((s: StatsFile) => s.project).sort()).toEqual(['/test/project-a', '/test/project-b']);
   });
 
+  it('GET /api/stats includes the authoritative hash field on every record', async () => {
+    writeStats('/test/has-hash', { codegraph_search: { count: 1, errors: 0, totalMs: 1, minMs: 1, maxMs: 1 } });
+
+    const result = await httpGet('/api/stats');
+    expect(result.status).toBe(200);
+    expect(result.body).toHaveLength(1);
+    const proj = result.body[0];
+    expect(proj.hash).toBe(projectHash('/test/has-hash'));
+    expect(proj.sessionCount).toBe(1);
+  });
+
   it('GET /api/stats returns empty array when no stats', async () => {
-    const http = await import('http');
-    const { handleApiRequest } = await import('../src/dashboard/api');
+    const result = await httpGet('/api/stats');
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual([]);
+  });
 
-    const result = await new Promise<{ status: number; body: any }>((resolve) => {
-      const testServer = http.createServer((req, res) => {
-        handleApiRequest(req, res);
-        res.on('finish', () => {
-          testServer.close();
-        });
-      });
+  it('GET /api/sessions/:hash returns per-session detail newest-first', async () => {
+    const project = '/test/multi-sessions';
+    const t1 = Date.now() - 200_000;
+    const t2 = Date.now() - 80_000;
+    writeSessionStats(project, t1, { codegraph_search: { count: 2, errors: 0, totalMs: 2, minMs: 1, maxMs: 1 } });
+    writeSessionStats(project, t2, { codegraph_search: { count: 5, errors: 0, totalMs: 5, minMs: 1, maxMs: 1 } });
 
-      testServer.listen(0, () => {
-        const addr = testServer.address() as { port: number };
-        http.get(`http://localhost:${addr.port}/api/stats`, (res) => {
-          let data = '';
-          res.on('data', c => data += c);
-          res.on('end', () => {
-            resolve({ status: res.statusCode!, body: JSON.parse(data) });
-          });
-        });
-      });
-    });
+    const result = await httpGet(`/api/sessions/${projectHash(project)}`);
+    expect(result.status).toBe(200);
+    expect(result.body).toHaveLength(2);
+    // Newest first
+    expect(result.body[0].startedAt).toBeGreaterThan(result.body[1].startedAt);
+  });
 
+  it('GET /api/sessions/:hash returns empty array for an unknown hash', async () => {
+    const result = await httpGet('/api/sessions/000000000000');
     expect(result.status).toBe(200);
     expect(result.body).toEqual([]);
   });
@@ -117,29 +137,7 @@ describe('Dashboard API', () => {
     };
     writeFileSync(join(historyDir, `${hash}_2026-05-27.json`), JSON.stringify(entry));
 
-    const http = await import('http');
-    const { handleApiRequest } = await import('../src/dashboard/api');
-
-    const result = await new Promise<{ status: number; body: any }>((resolve) => {
-      const testServer = http.createServer((req, res) => {
-        handleApiRequest(req, res);
-        res.on('finish', () => {
-          testServer.close();
-        });
-      });
-
-      testServer.listen(0, () => {
-        const addr = testServer.address() as { port: number };
-        http.get(`http://localhost:${addr.port}/api/history/${hash}`, (res) => {
-          let data = '';
-          res.on('data', c => data += c);
-          res.on('end', () => {
-            resolve({ status: res.statusCode!, body: JSON.parse(data) });
-          });
-        });
-      });
-    });
-
+    const result = await httpGet(`/api/history/${hash}`);
     expect(result.status).toBe(200);
     expect(result.body).toHaveLength(1);
     expect(result.body[0].project).toBe('/test/with-history');

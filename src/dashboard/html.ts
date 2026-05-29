@@ -4,9 +4,14 @@
  * Features:
  *   - Summary card with aggregate stats
  *   - Per-project cards with tool call bar charts and cache stats
+ *   - Sessions panel: per-session breakdown for the current day
+ *   - History panel: daily rollups for up to 30 days
  *   - Dark mode support (prefers-color-scheme)
  *   - 5-second auto-refresh
- *   - History view per project
+ *
+ * The dashboard never recomputes the project hash — it uses the `hash` field
+ * that /api/stats returns (which comes straight from the on-disk directory
+ * name, the authoritative source).
  */
 
 export function getDashboardHTML(): string {
@@ -122,10 +127,18 @@ header h1 {
 }
 .project-card .meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   font-size: 0.8rem;
   color: var(--text-secondary);
   margin-bottom: 16px;
+}
+.session-badge {
+  background: var(--accent-light);
+  color: var(--accent);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-weight: 500;
 }
 .card-body {
   display: grid;
@@ -199,8 +212,13 @@ header h1 {
 .hit-rate.good { color: var(--success); }
 .hit-rate.ok { color: var(--warning); }
 .hit-rate.bad { color: var(--error); }
-.history-btn {
+.panel-buttons {
+  display: flex;
+  gap: 8px;
   margin-top: 12px;
+  flex-wrap: wrap;
+}
+.panel-btn {
   background: var(--accent-light);
   color: var(--accent);
   border: none;
@@ -210,8 +228,8 @@ header h1 {
   font-size: 0.8rem;
   font-weight: 500;
 }
-.history-btn:hover { opacity: 0.8; }
-.history-panel {
+.panel-btn:hover { opacity: 0.8; }
+.panel {
   margin-top: 12px;
   padding: 12px;
   background: var(--bar-bg);
@@ -219,19 +237,19 @@ header h1 {
   font-size: 0.8rem;
   display: none;
 }
-.history-panel.open { display: block; }
-.history-table {
+.panel.open { display: block; }
+.panel-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.75rem;
 }
-.history-table th, .history-table td {
+.panel-table th, .panel-table td {
   padding: 4px 8px;
   text-align: right;
   border-bottom: 1px solid var(--border);
 }
-.history-table th { color: var(--text-secondary); font-weight: 500; }
-.history-table td:first-child, .history-table th:first-child { text-align: left; }
+.panel-table th { color: var(--text-secondary); font-weight: 500; }
+.panel-table td:first-child, .panel-table th:first-child { text-align: left; }
 .empty-state {
   text-align: center;
   padding: 60px 20px;
@@ -256,7 +274,6 @@ header h1 {
 
 <script>
 const API_BASE = '';
-let historyCache = {};
 
 async function fetchStats() {
   try {
@@ -284,6 +301,7 @@ function render(stats) {
   // Compute summary
   let totalCalls = 0, totalErrors = 0, totalLatency = 0, totalCallsForAvg = 0;
   let totalHits = 0, totalMisses = 0;
+  let totalSessions = 0;
   let maxUptime = 0;
 
   for (const s of stats) {
@@ -295,6 +313,7 @@ function render(stats) {
     }
     totalHits += s.cache.hits;
     totalMisses += s.cache.misses;
+    totalSessions += s.sessionCount || 1;
     const uptime = s.updatedAt - s.startedAt;
     if (uptime > maxUptime) maxUptime = uptime;
   }
@@ -310,6 +329,7 @@ function render(stats) {
       <div class="stat-box"><div class="value">\${avgLatency}ms</div><div class="label">Avg Latency</div></div>
       <div class="stat-box"><div class="value">\${cacheRate}%</div><div class="label">Cache Hit Rate</div></div>
       <div class="stat-box"><div class="value">\${stats.length}</div><div class="label">Active Projects</div></div>
+      <div class="stat-box"><div class="value">\${totalSessions}</div><div class="label">Sessions Today</div></div>
       <div class="stat-box"><div class="value">\${formatUptime(maxUptime)}</div><div class="label">Max Uptime</div></div>
     </div>
     <div class="projects">\`;
@@ -332,7 +352,6 @@ function renderProject(s) {
   for (const [name, t] of tools) {
     const pct = (t.count / maxCount * 100).toFixed(0);
     const shortName = name.replace('codegraph_', '');
-    const avg = t.count > 0 ? (t.totalMs / t.count).toFixed(1) : '0';
     toolsHtml += \`
       <li class="tool-item">
         <span class="name" title="\${name}">\${shortName}</span>
@@ -346,14 +365,18 @@ function renderProject(s) {
     ? ((s.cache.hits / (s.cache.hits + s.cache.misses)) * 100).toFixed(1) : '—';
   const hitClass = hitRate === '—' ? '' : parseFloat(hitRate) >= 70 ? 'good' : parseFloat(hitRate) >= 40 ? 'ok' : 'bad';
 
-  const hash = simpleHash(s.project);
+  // hash now comes straight from the API — never recomputed client-side
+  const hash = s.hash;
+  const sessionCount = s.sessionCount || 1;
+  const sessionLabel = sessionCount === 1 ? '1 session' : sessionCount + ' sessions';
 
   return \`
     <div class="project-card">
       <h3>\${escapeHtml(s.projectName)}</h3>
       <div class="path">\${escapeHtml(s.project)}</div>
       <div class="meta">
-        <span>Started: \${startTime}</span>
+        <span class="session-badge">\${sessionLabel} today</span>
+        <span>First started: \${startTime}</span>
         <span>Uptime: \${formatUptime(uptime)}</span>
         <span>Updated: \${new Date(s.updatedAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
       </div>
@@ -361,17 +384,58 @@ function renderProject(s) {
         <div>\${toolsHtml}</div>
         <div>
           <div class="cache-box">
-            <h4>Node Cache</h4>
-            <div class="cache-stat"><span>Hits</span><span class="val">\${s.cache.hits}</span></div>
-            <div class="cache-stat"><span>Misses</span><span class="val">\${s.cache.misses}</span></div>
+            <h4>Node Cache (latest session)</h4>
+            <div class="cache-stat"><span>Hits (today)</span><span class="val">\${s.cache.hits}</span></div>
+            <div class="cache-stat"><span>Misses (today)</span><span class="val">\${s.cache.misses}</span></div>
             <div class="cache-stat"><span>Size</span><span class="val">\${s.cache.size} / \${s.cache.maxSize}</span></div>
             <div class="hit-rate \${hitClass}">\${hitRate}%</div>
           </div>
-          <button class="history-btn" onclick="toggleHistory('\${hash}')">View History</button>
-          <div class="history-panel" id="history-\${hash}"></div>
+          <div class="panel-buttons">
+            <button class="panel-btn" onclick="toggleSessions('\${hash}')">View Sessions</button>
+            <button class="panel-btn" onclick="toggleHistory('\${hash}')">View History</button>
+          </div>
+          <div class="panel" id="sessions-\${hash}"></div>
+          <div class="panel" id="history-\${hash}"></div>
         </div>
       </div>
     </div>\`;
+}
+
+async function toggleSessions(hash) {
+  const panel = document.getElementById('sessions-' + hash);
+  if (panel.classList.contains('open')) {
+    panel.classList.remove('open');
+    return;
+  }
+  panel.innerHTML = 'Loading...';
+  panel.classList.add('open');
+
+  try {
+    const res = await fetch(API_BASE + '/api/sessions/' + hash);
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) {
+      panel.innerHTML = '<em>No session data yet</em>';
+      return;
+    }
+    let table = '<table class="panel-table"><tr><th>Started</th><th>Duration</th><th>Calls</th><th>Errors</th><th>Cache Hit%</th></tr>';
+    for (const entry of data) {
+      const started = new Date(entry.startedAt);
+      const startedStr = started.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      const dur = formatUptime(entry.updatedAt - entry.startedAt);
+      let calls = 0, errors = 0;
+      for (const t of Object.values(entry.tools)) {
+        calls += t.count;
+        errors += t.errors;
+      }
+      const rate = (entry.cache.hits + entry.cache.misses) > 0
+        ? ((entry.cache.hits / (entry.cache.hits + entry.cache.misses)) * 100).toFixed(1) : '—';
+      table += \`<tr><td>\${startedStr}</td><td>\${dur}</td><td>\${calls}</td><td>\${errors}</td><td>\${rate}%</td></tr>\`;
+    }
+    table += '</table>';
+    panel.innerHTML = table;
+  } catch {
+    panel.innerHTML = '<em>Failed to load sessions</em>';
+  }
 }
 
 async function toggleHistory(hash) {
@@ -386,11 +450,11 @@ async function toggleHistory(hash) {
   try {
     const res = await fetch(API_BASE + '/api/history/' + hash);
     const data = await res.json();
-    if (data.length === 0) {
+    if (!Array.isArray(data) || data.length === 0) {
       panel.innerHTML = '<em>No history data yet</em>';
       return;
     }
-    let table = '<table class="history-table"><tr><th>Date</th><th>Calls</th><th>Errors</th><th>Cache Hit%</th></tr>';
+    let table = '<table class="panel-table"><tr><th>Date</th><th>Calls</th><th>Errors</th><th>Cache Hit%</th></tr>';
     for (const entry of data) {
       const date = new Date(entry.startedAt).toLocaleDateString();
       let calls = 0, errors = 0;
@@ -419,15 +483,7 @@ function formatUptime(ms) {
 }
 
 function escapeHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function simpleHash(str) {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) {
-    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h).toString(16).slice(0, 12);
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // Initial fetch + interval

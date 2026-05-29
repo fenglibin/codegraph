@@ -11,7 +11,7 @@
 import { createServer, IncomingMessage, ServerResponse, Server } from 'http';
 import { handleApiRequest } from './api';
 import { getDashboardHTML } from './html';
-import { cleanupOldHistory } from '../mcp/stats-writer';
+import { cleanupOldHistory, runStartupMaintenance } from '../mcp/stats-writer';
 
 export class DashboardServer {
   private server: Server | null = null;
@@ -22,6 +22,12 @@ export class DashboardServer {
   }
 
   async start(): Promise<void> {
+    // Bring the on-disk stats layout up to date before serving requests:
+    // migrate pre-0.10.8 loose <hash>.json files into the per-session layout
+    // and archive any session files left from previous days. Without this,
+    // a project the user hasn't reopened in a fresh MCP session would either
+    // stay in the legacy layout or sit invisibly in <hash>/ forever.
+    runStartupMaintenance();
     // Clean up old history files on startup
     cleanupOldHistory();
 

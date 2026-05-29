@@ -2,28 +2,31 @@
  * Dashboard API — handles HTTP routes for the CodeGraph dashboard.
  *
  * Routes:
- *   GET /api/stats         — all projects' current stats
- *   GET /api/stats/:hash   — single project's current stats
- *   GET /api/history/:hash — single project's historical stats (30 days)
+ *   GET /api/stats           — all projects' current aggregated stats (today's sessions)
+ *   GET /api/stats/:hash     — one project's current aggregated stats
+ *   GET /api/sessions/:hash  — one project's per-session breakdown (newest first)
+ *   GET /api/history/:hash   — one project's daily history (30 days, oldest first)
+ *
+ * The :hash segment is the same SHA-256-prefix hash that StatsWriter uses to
+ * name the on-disk project directory. Dashboard clients pull it from the
+ * `hash` field returned by /api/stats — they never compute it themselves.
  */
 
 import { IncomingMessage, ServerResponse } from 'http';
-import { readAllStats, readProjectHistory, projectHash } from '../mcp/stats-writer';
+import { readAllStats, readProjectHistory, readSessionsForProject } from '../mcp/stats-writer';
 
 export function handleApiRequest(req: IncomingMessage, res: ServerResponse): boolean {
   const url = req.url || '/';
 
   if (url === '/api/stats') {
-    const stats = readAllStats();
-    sendJson(res, stats);
+    sendJson(res, readAllStats());
     return true;
   }
 
   const statsMatch = url.match(/^\/api\/stats\/([a-f0-9]+)$/);
   if (statsMatch) {
     const hash = statsMatch[1]!;
-    const all = readAllStats();
-    const project = all.find(s => projectHash(s.project) === hash);
+    const project = readAllStats().find(s => s.hash === hash);
     if (project) {
       sendJson(res, project);
     } else {
@@ -33,11 +36,15 @@ export function handleApiRequest(req: IncomingMessage, res: ServerResponse): boo
     return true;
   }
 
+  const sessionsMatch = url.match(/^\/api\/sessions\/([a-f0-9]+)$/);
+  if (sessionsMatch) {
+    sendJson(res, readSessionsForProject(sessionsMatch[1]!));
+    return true;
+  }
+
   const historyMatch = url.match(/^\/api\/history\/([a-f0-9]+)$/);
   if (historyMatch) {
-    const hash = historyMatch[1]!;
-    const history = readProjectHistory(hash);
-    sendJson(res, history);
+    sendJson(res, readProjectHistory(historyMatch[1]!));
     return true;
   }
 
