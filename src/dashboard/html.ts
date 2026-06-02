@@ -4,7 +4,7 @@
  * Features:
  *   - Summary card with aggregate stats
  *   - Per-project cards with tool call bar charts and cache stats
- *   - Sessions panel: per-session breakdown for the current day
+ *   - Sessions panel: per-session breakdown for the last 7 days
  *   - History panel: daily rollups for up to 30 days
  *   - Dark mode support (prefers-color-scheme)
  *   - 5-second auto-refresh
@@ -329,7 +329,7 @@ function render(stats) {
       <div class="stat-box"><div class="value">\${avgLatency}ms</div><div class="label">Avg Latency</div></div>
       <div class="stat-box"><div class="value">\${cacheRate}%</div><div class="label">Cache Hit Rate</div></div>
       <div class="stat-box"><div class="value">\${stats.length}</div><div class="label">Active Projects</div></div>
-      <div class="stat-box"><div class="value">\${totalSessions}</div><div class="label">Sessions Today</div></div>
+      <div class="stat-box"><div class="value">\${totalSessions}</div><div class="label">Sessions (7d)</div></div>
       <div class="stat-box"><div class="value">\${formatUptime(maxUptime)}</div><div class="label">Max Uptime</div></div>
     </div>
     <div class="projects">\`;
@@ -375,7 +375,7 @@ function renderProject(s) {
       <h3>\${escapeHtml(s.projectName)}</h3>
       <div class="path">\${escapeHtml(s.project)}</div>
       <div class="meta">
-        <span class="session-badge">\${sessionLabel} today</span>
+        <span class="session-badge">\${sessionLabel} (7d)</span>
         <span>First started: \${startTime}</span>
         <span>Uptime: \${formatUptime(uptime)}</span>
         <span>Updated: \${new Date(s.updatedAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
@@ -385,8 +385,8 @@ function renderProject(s) {
         <div>
           <div class="cache-box">
             <h4>Node Cache (latest session)</h4>
-            <div class="cache-stat"><span>Hits (today)</span><span class="val">\${s.cache.hits}</span></div>
-            <div class="cache-stat"><span>Misses (today)</span><span class="val">\${s.cache.misses}</span></div>
+            <div class="cache-stat"><span>Hits (7d)</span><span class="val">\${s.cache.hits}</span></div>
+            <div class="cache-stat"><span>Misses (7d)</span><span class="val">\${s.cache.misses}</span></div>
             <div class="cache-stat"><span>Size</span><span class="val">\${s.cache.size} / \${s.cache.maxSize}</span></div>
             <div class="hit-rate \${hitClass}">\${hitRate}%</div>
           </div>

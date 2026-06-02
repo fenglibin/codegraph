@@ -186,36 +186,36 @@ describe('StatsWriter', () => {
   });
 
   describe('archive rotation', () => {
-    it('moves previous-day session files into a single history rollup', () => {
+    it('moves session files older than 7 days into a single history rollup', () => {
       const hash = projectHash('/test/archive');
       const projectDir = getProjectDir(hash);
       const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
       mkdirSync(projectDir, { recursive: true });
       mkdirSync(historyDir, { recursive: true });
 
-      // Write two fake yesterday session files
-      const yesterday = Date.now() - 86_400_000;
+      // Write two fake 8-days-ago session files (updatedAt also 8 days ago = stale)
+      const eightDaysAgo = Date.now() - 8 * 86_400_000;
       const session1: StatsFile = {
         version: 1, project: '/test/archive', projectName: 'archive',
-        startedAt: yesterday, updatedAt: yesterday + 1000,
+        startedAt: eightDaysAgo, updatedAt: eightDaysAgo + 1000,
         tools: { codegraph_search: { count: 2, errors: 0, totalMs: 1.5, minMs: 0.5, maxMs: 1.0 } },
         cache: { hits: 10, misses: 5, size: 15, maxSize: 1000 },
       };
       const session2: StatsFile = {
         version: 1, project: '/test/archive', projectName: 'archive',
-        startedAt: yesterday + 5_000, updatedAt: yesterday + 6_000,
+        startedAt: eightDaysAgo + 5_000, updatedAt: eightDaysAgo + 6_000,
         tools: { codegraph_search: { count: 3, errors: 1, totalMs: 2.0, minMs: 0.6, maxMs: 1.2 } },
         cache: { hits: 4, misses: 2, size: 6, maxSize: 1000 },
       };
       writeFileSync(join(projectDir, `${session1.startedAt}_111.json`), JSON.stringify(session1));
       writeFileSync(join(projectDir, `${session2.startedAt}_222.json`), JSON.stringify(session2));
 
-      // Now write today's stats — yesterday's files should be archived
+      // Now write today's stats — 8-day-old files should be archived
       const writer = new StatsWriter('/test/archive');
       writer.scheduleWrite(makeSnapshot());
       writer.flush();
 
-      // history/ should have one rollup file for yesterday with both sessions summed
+      // history/ should have one rollup file with both sessions summed
       const historyFiles = readdirSync(historyDir);
       const archived = historyFiles.find(f => f.startsWith(hash));
       expect(archived).toBeDefined();
@@ -226,8 +226,69 @@ describe('StatsWriter', () => {
       expect(rolled.cache.hits).toBe(14); // 10 + 4
       expect(rolled.cache.misses).toBe(7); // 5 + 2
 
-      // The yesterday session files should be gone
-      const remaining = readdirSync(projectDir).filter(f => f.startsWith(String(yesterday)));
+      // The old session files should be gone
+      const remaining = readdirSync(projectDir).filter(f => f.startsWith(String(eightDaysAgo)));
+      expect(remaining.length).toBe(0);
+    });
+
+    it('does NOT archive a session updated within the last 7 days', () => {
+      const hash = projectHash('/test/long-lived-archive');
+      const projectDir = getProjectDir(hash);
+      const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
+      mkdirSync(projectDir, { recursive: true });
+      mkdirSync(historyDir, { recursive: true });
+
+      // A session started 5 days ago and updated now (within 7-day window)
+      const fiveDaysAgo = Date.now() - 5 * 86_400_000;
+      const longLived: StatsFile = {
+        version: 1, project: '/test/long-lived-archive', projectName: 'long-lived-archive',
+        startedAt: fiveDaysAgo, updatedAt: Date.now(),
+        tools: { codegraph_search: { count: 7, errors: 0, totalMs: 7, minMs: 1, maxMs: 1 } },
+        cache: { hits: 20, misses: 5, size: 25, maxSize: 1000 },
+      };
+      writeFileSync(join(projectDir, `${fiveDaysAgo}_333.json`), JSON.stringify(longLived));
+
+      // Trigger archive by writing a new session
+      const writer = new StatsWriter('/test/long-lived-archive');
+      writer.scheduleWrite(makeSnapshot());
+      writer.flush();
+
+      // The long-lived session file should NOT be archived
+      const remaining = readdirSync(projectDir).filter(f => f.startsWith(String(fiveDaysAgo)));
+      expect(remaining.length).toBe(1);
+      // No history file should have been created
+      const historyFiles = readdirSync(historyDir).filter(f => f.startsWith(hash));
+      expect(historyFiles.length).toBe(0);
+    });
+
+    it('removes the project directory when all sessions are archived', () => {
+      const hash = projectHash('/test/empty-dir-cleanup');
+      const projectDir = getProjectDir(hash);
+      const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
+      mkdirSync(projectDir, { recursive: true });
+      mkdirSync(historyDir, { recursive: true });
+
+      // Only stale sessions in the directory — all will be archived
+      const eightDaysAgo = Date.now() - 8 * 86_400_000;
+      const sess: StatsFile = {
+        version: 1, project: '/test/empty-dir-cleanup', projectName: 'empty-dir-cleanup',
+        startedAt: eightDaysAgo, updatedAt: eightDaysAgo + 1_000,
+        tools: { codegraph_search: { count: 1, errors: 0, totalMs: 1, minMs: 1, maxMs: 1 } },
+        cache: { hits: 2, misses: 1, size: 3, maxSize: 1000 },
+      };
+      writeFileSync(join(projectDir, `${eightDaysAgo}_111.json`), JSON.stringify(sess));
+
+      // Trigger archive by writing a new session for a DIFFERENT project
+      // (or by using StatsWriter for this project, which archives before writing)
+      const writer = new StatsWriter('/test/empty-dir-cleanup');
+      writer.scheduleWrite(makeSnapshot());
+      writer.flush();
+
+      // The project directory should have been removed (it was empty after archiving
+      // the old session, then the new session creates a fresh directory).
+      // After flush, the directory exists again because StatsWriter creates it.
+      // But the old session file should be gone.
+      const remaining = readdirSync(projectDir).filter(f => f.startsWith(String(eightDaysAgo)));
       expect(remaining.length).toBe(0);
     });
   });
@@ -429,45 +490,232 @@ describe('StatsWriter', () => {
     });
   });
 
-  describe('readAllStats() — today filter', () => {
-    it('excludes session files dated before today (they belong in History after archive)', () => {
-      const hash = projectHash('/test/yesterday-only');
+  describe('readAllStats() — 7-day active window', () => {
+    it('excludes session files not updated within 7 days', () => {
+      const hash = projectHash('/test/old-only');
       const projectDir = getProjectDir(hash);
       mkdirSync(projectDir, { recursive: true });
 
-      const yesterday = Date.now() - 86_400_000;
-      const yStats: StatsFile = {
-        version: 1, project: '/test/yesterday-only', projectName: 'yesterday-only',
-        startedAt: yesterday, updatedAt: yesterday + 1_000,
+      // 8 days ago — outside the 7-day window
+      const eightDaysAgo = Date.now() - 8 * 86_400_000;
+      const oldStats: StatsFile = {
+        version: 1, project: '/test/old-only', projectName: 'old-only',
+        startedAt: eightDaysAgo, updatedAt: eightDaysAgo + 1_000,
         tools: { codegraph_search: { count: 1, errors: 0, totalMs: 1, minMs: 1, maxMs: 1 } },
         cache: { hits: 0, misses: 0, size: 0, maxSize: 0 },
       };
-      writeFileSync(join(projectDir, `${yesterday}_111.json`), JSON.stringify(yStats));
+      writeFileSync(join(projectDir, `${eightDaysAgo}_111.json`), JSON.stringify(oldStats));
 
       const all = readAllStats();
-      expect(all.find(s => s.project === '/test/yesterday-only')).toBeUndefined();
+      expect(all.find(s => s.project === '/test/old-only')).toBeUndefined();
     });
 
-    it('excludes legacy <hash>.json dated before today', () => {
+    it('includes session files started 3 days ago but updated today (long-lived MCP server)', () => {
+      const hash = projectHash('/test/long-lived');
+      const projectDir = getProjectDir(hash);
+      mkdirSync(projectDir, { recursive: true });
+
+      const threeDaysAgo = Date.now() - 3 * 86_400_000;
+      const longLived: StatsFile = {
+        version: 1, project: '/test/long-lived', projectName: 'long-lived',
+        startedAt: threeDaysAgo, updatedAt: Date.now(),
+        tools: { codegraph_search: { count: 5, errors: 0, totalMs: 5, minMs: 1, maxMs: 2 } },
+        cache: { hits: 42, misses: 8, size: 50, maxSize: 1000 },
+      };
+      writeFileSync(join(projectDir, `${threeDaysAgo}_222.json`), JSON.stringify(longLived));
+
+      const all = readAllStats();
+      const proj = all.find(s => s.project === '/test/long-lived');
+      expect(proj).toBeDefined();
+      expect(proj!.tools.codegraph_search!.count).toBe(5);
+      expect(proj!.cache.hits).toBe(42);
+    });
+
+    it('includes session files updated within 7 days', () => {
+      const hash = projectHash('/test/recent');
+      const projectDir = getProjectDir(hash);
+      mkdirSync(projectDir, { recursive: true });
+
+      const fiveDaysAgo = Date.now() - 5 * 86_400_000;
+      const recent: StatsFile = {
+        version: 1, project: '/test/recent', projectName: 'recent',
+        startedAt: fiveDaysAgo, updatedAt: fiveDaysAgo + 1_000,
+        tools: { codegraph_search: { count: 2, errors: 0, totalMs: 2, minMs: 1, maxMs: 1 } },
+        cache: { hits: 10, misses: 3, size: 13, maxSize: 1000 },
+      };
+      writeFileSync(join(projectDir, `${fiveDaysAgo}_333.json`), JSON.stringify(recent));
+
+      const all = readAllStats();
+      const proj = all.find(s => s.project === '/test/recent');
+      expect(proj).toBeDefined();
+      expect(proj!.tools.codegraph_search!.count).toBe(2);
+    });
+
+    it('excludes legacy <hash>.json not updated within 7 days', () => {
       const statsDir = join(tmpHome, '.codegraph', 'stats');
       mkdirSync(statsDir, { recursive: true });
-      const hash = projectHash('/test/legacy-yesterday');
-      const yesterday = Date.now() - 86_400_000;
+      const hash = projectHash('/test/legacy-old');
+      const eightDaysAgo = Date.now() - 8 * 86_400_000;
       const stale: StatsFile = {
-        version: 1, project: '/test/legacy-yesterday', projectName: 'legacy-yesterday',
-        startedAt: yesterday, updatedAt: yesterday + 1_000,
+        version: 1, project: '/test/legacy-old', projectName: 'legacy-old',
+        startedAt: eightDaysAgo, updatedAt: eightDaysAgo + 1_000,
         tools: {}, cache: { hits: 0, misses: 0, size: 0, maxSize: 0 },
       };
       writeFileSync(join(statsDir, `${hash}.json`), JSON.stringify(stale));
 
       const all = readAllStats();
-      expect(all.find(s => s.project === '/test/legacy-yesterday')).toBeUndefined();
+      expect(all.find(s => s.project === '/test/legacy-old')).toBeUndefined();
+    });
+
+    it('includes legacy <hash>.json updated within 7 days', () => {
+      const statsDir = join(tmpHome, '.codegraph', 'stats');
+      mkdirSync(statsDir, { recursive: true });
+      const hash = projectHash('/test/legacy-recent');
+      const threeDaysAgo = Date.now() - 3 * 86_400_000;
+      const active: StatsFile = {
+        version: 1, project: '/test/legacy-recent', projectName: 'legacy-recent',
+        startedAt: threeDaysAgo, updatedAt: Date.now(),
+        tools: { codegraph_search: { count: 3, errors: 0, totalMs: 3, minMs: 1, maxMs: 1 } },
+        cache: { hits: 10, misses: 2, size: 12, maxSize: 1000 },
+      };
+      writeFileSync(join(statsDir, `${hash}.json`), JSON.stringify(active));
+
+      const all = readAllStats();
+      const proj = all.find(s => s.project === '/test/legacy-recent');
+      expect(proj).toBeDefined();
+      expect(proj!.tools.codegraph_search!.count).toBe(3);
+    });
+
+    it('returns projects sorted by updatedAt descending (most recently active first)', () => {
+      const hashA = projectHash('/test/sort-a');
+      const hashB = projectHash('/test/sort-b');
+      const dirA = getProjectDir(hashA);
+      const dirB = getProjectDir(hashB);
+      mkdirSync(dirA, { recursive: true });
+      mkdirSync(dirB, { recursive: true });
+
+      const now = Date.now();
+      // Project A updated 1 hour ago
+      const statsA: StatsFile = {
+        version: 1, project: '/test/sort-a', projectName: 'sort-a',
+        startedAt: now - 86_400_000, updatedAt: now - 3600_000,
+        tools: { codegraph_search: { count: 1, errors: 0, totalMs: 1, minMs: 1, maxMs: 1 } },
+        cache: { hits: 0, misses: 0, size: 0, maxSize: 0 },
+      };
+      // Project B updated just now (more recent)
+      const statsB: StatsFile = {
+        version: 1, project: '/test/sort-b', projectName: 'sort-b',
+        startedAt: now - 86_400_000, updatedAt: now,
+        tools: { codegraph_search: { count: 2, errors: 0, totalMs: 2, minMs: 1, maxMs: 1 } },
+        cache: { hits: 0, misses: 0, size: 0, maxSize: 0 },
+      };
+      writeFileSync(join(dirA, `${now - 86_400_000}_111.json`), JSON.stringify(statsA));
+      writeFileSync(join(dirB, `${now - 86_400_000}_222.json`), JSON.stringify(statsB));
+
+      const all = readAllStats();
+      expect(all.length).toBeGreaterThanOrEqual(2);
+      const aIdx = all.findIndex(s => s.project === '/test/sort-a');
+      const bIdx = all.findIndex(s => s.project === '/test/sort-b');
+      expect(bIdx).toBeLessThan(aIdx); // B (more recent) should come first
+    });
+
+    it('includes history rollups within the 7-day window', () => {
+      const hash = projectHash('/test/history-recent');
+      const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
+      mkdirSync(historyDir, { recursive: true });
+
+      // Simulate a session that was already archived to history but is
+      // within the 7-day window (e.g. archived by old "today-only" logic).
+      const threeDaysAgo = Date.now() - 3 * 86_400_000;
+      const date = new Date(threeDaysAgo);
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      const archived: StatsFile = {
+        version: 1, project: '/test/history-recent', projectName: 'history-recent',
+        startedAt: threeDaysAgo, updatedAt: threeDaysAgo + 1_000,
+        tools: { codegraph_search: { count: 7, errors: 0, totalMs: 7, minMs: 1, maxMs: 1 } },
+        cache: { hits: 20, misses: 5, size: 25, maxSize: 1000 },
+      };
+      writeFileSync(
+        join(historyDir, `${hash}_${dateStr}.json`),
+        JSON.stringify(archived)
+      );
+
+      const all = readAllStats();
+      const proj = all.find(s => s.project === '/test/history-recent');
+      expect(proj).toBeDefined();
+      expect(proj!.tools.codegraph_search!.count).toBe(7);
+      expect(proj!.cache.hits).toBe(20);
+    });
+
+    it('excludes history rollups older than 7 days', () => {
+      const hash = projectHash('/test/history-old');
+      const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
+      mkdirSync(historyDir, { recursive: true });
+
+      const eightDaysAgo = Date.now() - 8 * 86_400_000;
+      const date = new Date(eightDaysAgo);
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      const old: StatsFile = {
+        version: 1, project: '/test/history-old', projectName: 'history-old',
+        startedAt: eightDaysAgo, updatedAt: eightDaysAgo + 1_000,
+        tools: { codegraph_search: { count: 2, errors: 0, totalMs: 2, minMs: 1, maxMs: 1 } },
+        cache: { hits: 5, misses: 1, size: 6, maxSize: 1000 },
+      };
+      writeFileSync(
+        join(historyDir, `${hash}_${dateStr}.json`),
+        JSON.stringify(old)
+      );
+
+      const all = readAllStats();
+      expect(all.find(s => s.project === '/test/history-old')).toBeUndefined();
+    });
+
+    it('merges active sessions and history rollups for the same project', () => {
+      const hash = projectHash('/test/merged');
+      const projectDir = getProjectDir(hash);
+      const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
+      mkdirSync(projectDir, { recursive: true });
+      mkdirSync(historyDir, { recursive: true });
+
+      // Active session (today)
+      const now = Date.now();
+      const active: StatsFile = {
+        version: 1, project: '/test/merged', projectName: 'merged',
+        startedAt: now - 1_000, updatedAt: now,
+        tools: { codegraph_search: { count: 3, errors: 0, totalMs: 3, minMs: 1, maxMs: 1 } },
+        cache: { hits: 10, misses: 2, size: 12, maxSize: 1000 },
+      };
+      writeFileSync(join(projectDir, `${now - 1_000}_111.json`), JSON.stringify(active));
+
+      // Archived rollup from 3 days ago
+      const threeDaysAgo = Date.now() - 3 * 86_400_000;
+      const date = new Date(threeDaysAgo);
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      const archived: StatsFile = {
+        version: 1, project: '/test/merged', projectName: 'merged',
+        startedAt: threeDaysAgo, updatedAt: threeDaysAgo + 1_000,
+        tools: { codegraph_search: { count: 5, errors: 1, totalMs: 5, minMs: 1, maxMs: 2 } },
+        cache: { hits: 15, misses: 3, size: 18, maxSize: 1000 },
+      };
+      writeFileSync(
+        join(historyDir, `${hash}_${dateStr}.json`),
+        JSON.stringify(archived)
+      );
+
+      const all = readAllStats();
+      const proj = all.find(s => s.project === '/test/merged');
+      expect(proj).toBeDefined();
+      // Active + archived should be aggregated: 3 + 5 = 8
+      expect(proj!.tools.codegraph_search!.count).toBe(8);
+      expect(proj!.tools.codegraph_search!.errors).toBe(1);
+      expect(proj!.cache.hits).toBe(25); // 10 + 15
+      expect(proj!.cache.misses).toBe(5); // 2 + 3
     });
   });
 
   describe('archiveOldSessions — concurrency-tolerant overwrite', () => {
     it('does NOT double-count when a partial history rollup already exists for the same day', () => {
-      // Simulates the race: writer A wrote a complete rollup for yesterday,
+      // Simulates the race: writer A wrote a complete rollup for an old day,
       // crashed before deleting source files. A subsequent archive run
       // re-aggregates the same sources and overwrites the rollup with the
       // same data — counts must NOT double.
@@ -477,17 +725,17 @@ describe('StatsWriter', () => {
       mkdirSync(projectDir, { recursive: true });
       mkdirSync(historyDir, { recursive: true });
 
-      const yesterday = Date.now() - 86_400_000;
+      const eightDaysAgo = Date.now() - 8 * 86_400_000;
       const sess: StatsFile = {
         version: 1, project: '/test/no-double-count', projectName: 'no-double-count',
-        startedAt: yesterday, updatedAt: yesterday + 1_000,
+        startedAt: eightDaysAgo, updatedAt: eightDaysAgo + 1_000,
         tools: { codegraph_search: { count: 4, errors: 0, totalMs: 4, minMs: 1, maxMs: 1 } },
         cache: { hits: 6, misses: 2, size: 8, maxSize: 1000 },
       };
-      writeFileSync(join(projectDir, `${yesterday}_111.json`), JSON.stringify(sess));
+      writeFileSync(join(projectDir, `${eightDaysAgo}_111.json`), JSON.stringify(sess));
 
       // Pre-existing rollup that already contains the same session's data
-      const date = new Date(yesterday);
+      const date = new Date(eightDaysAgo);
       const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
       writeFileSync(join(historyDir, `${hash}_${dateStr}.json`), JSON.stringify(sess));
 
@@ -524,30 +772,52 @@ describe('StatsWriter', () => {
       expect(existsSync(join(statsDir, hash, `${startedAt}_legacy.json`))).toBe(true);
     });
 
-    it('archives stale yesterday session files even when no MCP write occurs', () => {
+    it('archives stale session files older than 7 days even when no MCP write occurs', () => {
       const hash = projectHash('/test/stale-archive');
       const projectDir = getProjectDir(hash);
       const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
       mkdirSync(projectDir, { recursive: true });
 
-      const yesterday = Date.now() - 86_400_000;
+      // A session started AND last updated 8 days ago = stale (outside 7-day window)
+      const eightDaysAgo = Date.now() - 8 * 86_400_000;
       const sess: StatsFile = {
         version: 1, project: '/test/stale-archive', projectName: 'stale-archive',
-        startedAt: yesterday, updatedAt: yesterday + 1_000,
+        startedAt: eightDaysAgo, updatedAt: eightDaysAgo + 1_000,
         tools: { codegraph_search: { count: 9, errors: 1, totalMs: 5, minMs: 0.5, maxMs: 2 } },
         cache: { hits: 3, misses: 1, size: 4, maxSize: 1000 },
       };
-      writeFileSync(join(projectDir, `${yesterday}_222.json`), JSON.stringify(sess));
+      writeFileSync(join(projectDir, `${eightDaysAgo}_222.json`), JSON.stringify(sess));
 
       runStartupMaintenance();
 
-      // Source session file should be gone
-      expect(readdirSync(projectDir).some(f => f.startsWith(String(yesterday)))).toBe(false);
+      // Source session file should be gone — and since all sessions were stale,
+      // the project directory itself should be cleaned up (empty dir removed).
+      expect(existsSync(projectDir)).toBe(false);
       // History rollup must exist
       const archived = readdirSync(historyDir).find(f => f.startsWith(`${hash}_`));
       expect(archived).toBeDefined();
       const rolled: StatsFile = JSON.parse(readFileSync(join(historyDir, archived!), 'utf8'));
       expect(rolled.tools.codegraph_search!.count).toBe(9);
+    });
+
+    it('does NOT archive a session updated within the last 7 days', () => {
+      const hash = projectHash('/test/stale-long-lived');
+      const projectDir = getProjectDir(hash);
+      mkdirSync(projectDir, { recursive: true });
+
+      const fiveDaysAgo = Date.now() - 5 * 86_400_000;
+      const longLived: StatsFile = {
+        version: 1, project: '/test/stale-long-lived', projectName: 'stale-long-lived',
+        startedAt: fiveDaysAgo, updatedAt: Date.now(),
+        tools: { codegraph_search: { count: 3, errors: 0, totalMs: 3, minMs: 1, maxMs: 1 } },
+        cache: { hits: 5, misses: 1, size: 6, maxSize: 1000 },
+      };
+      writeFileSync(join(projectDir, `${fiveDaysAgo}_444.json`), JSON.stringify(longLived));
+
+      runStartupMaintenance();
+
+      // Session updated today should NOT be archived
+      expect(readdirSync(projectDir).some(f => f.startsWith(String(fiveDaysAgo)))).toBe(true);
     });
 
     it('is a no-op when the stats dir does not exist', () => {

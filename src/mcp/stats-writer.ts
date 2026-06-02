@@ -31,6 +31,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -272,9 +273,19 @@ export class StatsWriter {
 }
 
 /**
- * Move all session files in projectDir whose startedAt date != today into
- * history/<hash>_<date>.json, aggregating per-day. The session source files
- * are deleted only after the history file is successfully written.
+ * Move all session files in projectDir whose updatedAt is older than
+ * ACTIVE_WINDOW_DAYS into history/<hash>_<date>.json, aggregating per-day.
+ * The session source files are deleted only after the history file is
+ * successfully written.
+ *
+ * We use updatedAt (not startedAt) to determine "liveness": a long-lived
+ * MCP server started a week ago but still active today must NOT be archived
+ * simply because its startedAt falls outside the window. Only sessions whose
+ * last update is older than ACTIVE_WINDOW_DAYS are considered stale and
+ * eligible for archiving.
+ *
+ * The per-day grouping key is still startedAt (the session's logical date),
+ * which preserves the existing history/<hash>_<date>.json naming convention.
  *
  * Concurrency model:
  *   - We never merge with an existing history file. Two writers archiving
@@ -292,7 +303,7 @@ export class StatsWriter {
  */
 function archiveOldSessions(hash: string, projectDir: string, historyDir: string): void {
   if (!existsSync(projectDir)) return;
-  const today = toDateString(Date.now());
+  const cutoff = Date.now() - ACTIVE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
   let entries: string[];
   try {
@@ -301,7 +312,9 @@ function archiveOldSessions(hash: string, projectDir: string, historyDir: string
     return;
   }
 
-  // Group sessions by date, skipping today and unparseable files.
+  // Group sessions by their startedAt date, but only archive those whose
+  // updatedAt is older than ACTIVE_WINDOW_DAYS (i.e., no longer in the
+  // active window).
   const byDate = new Map<string, { sessions: StatsFile[]; sourcePaths: string[] }>();
   for (const file of entries) {
     if (!file.endsWith('.json') || file.endsWith('.tmp')) continue;
@@ -313,8 +326,10 @@ function archiveOldSessions(hash: string, projectDir: string, historyDir: string
       continue;
     }
     if (parsed.version !== 1) continue;
+    // A session that was updated within the active window is still visible
+    // — don't archive it even if it was started on a previous day/week.
+    if (parsed.updatedAt >= cutoff) continue;
     const date = toDateString(parsed.startedAt);
-    if (date === today) continue;
     let group = byDate.get(date);
     if (!group) {
       group = { sessions: [], sourcePaths: [] };
@@ -344,6 +359,15 @@ function archiveOldSessions(hash: string, projectDir: string, historyDir: string
       try { unlinkSync(p); } catch { /* ignore */ }
     }
   }
+
+  // Clean up the project directory if it's now empty — avoids leaving hollow
+  // <hash>/ directories that clutter the stats directory and waste inode space.
+  try {
+    const remaining = readdirSync(projectDir);
+    if (remaining.length === 0) {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  } catch { /* ignore — another writer may have added a file */ }
 }
 
 /**
@@ -446,10 +470,11 @@ export function cleanupOldHistory(): void {
  *      this, a project the user hasn't reopened in a new MCP session would
  *      stay in the legacy file forever and miss out on archive rotation.
  *   2. Archive any session files in ~/.codegraph/stats/<hash>/ whose
- *      startedAt date is before today, into history/<hash>_<date>.json.
- *      Without this, yesterday's sessions for a project the user closed
- *      remain invisible (filtered out of readAllStats) until the next MCP
- *      write for that project — possibly forever.
+ *      updatedAt is older than ACTIVE_WINDOW_DAYS, into
+ *      history/<hash>_<date>.json. Without this, stale sessions for a
+ *      project the user closed remain invisible (filtered out of
+ *      readAllStats) until the next MCP write for that project — possibly
+ *      forever.
  *
  * Best-effort: failures don't propagate, the dashboard still starts.
  */
@@ -525,36 +550,64 @@ export function runStartupMaintenance(): void {
       debugError('stats-writer', 'Startup archive failed', { projectDir, error: err instanceof Error ? err.message : String(err) });
     }
   }
+
+  // Pass 3 — clean up empty project directories left over from previous archive
+  // runs or from the pre-ACTIVE_WINDOW_DAYS era. An empty <hash>/ directory
+  // wastes inodes and clutters directory listings; removing it is safe because
+  // StatsWriter.mkdirSync's on the next write for that project.
+  let postArchive: string[];
+  try {
+    postArchive = readdirSync(statsDir);
+  } catch {
+    return;
+  }
+
+  for (const entry of postArchive) {
+    if (entry === HISTORY_DIR_NAME) continue;
+    if (!HASH_RE.test(entry)) continue;
+    const projectDir = join(statsDir, entry);
+    let st;
+    try { st = statSync(projectDir); } catch { continue; }
+    if (!st.isDirectory()) continue;
+
+    try {
+      const remaining = readdirSync(projectDir);
+      if (remaining.length === 0) {
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    } catch { /* another writer may be active — skip */ }
+  }
 }
+
+/** Number of days to include in the active dashboard view. */
+const ACTIVE_WINDOW_DAYS = 7;
 
 /**
  * Read all current stats from ~/.codegraph/stats/.
  *
- * Returns one AggregatedStats record per project, aggregating ONLY today's
- * session files in the active stats directory. Session files left over from
- * previous days (waiting on `runStartupMaintenance` or the next MCP write
- * for that project to archive them) are excluded so the dashboard's "today"
- * view is honest. Each record carries the authoritative `hash` from the
- * directory name — dashboard clients use it directly instead of recomputing.
+ * Returns one AggregatedStats record per project, aggregating session files
+ * whose updatedAt falls within the last ACTIVE_WINDOW_DAYS days. This gives
+ * users a broader view of recent activity while still excluding truly stale
+ * sessions. Results are sorted by updatedAt descending (most recently active
+ * first).
  *
- * Also tolerates legacy <hash>.json files that have not yet been migrated by
- * a StatsWriter (e.g. when the dashboard is opened before any new MCP
- * session has run): they are treated as a single-session record, again
- * filtered to today only.
+ * Data sources (merged by hash — never two rows for the same project):
+ *   1. Active <hash>/ directories — per-session files from running MCP servers
+ *   2. Top-level legacy <hash>.json — pre-0.10.8 layout, not yet migrated
+ *   3. History <hash>_<date>.json — archived rollups within the active window
  *
- * Hash dedupe: when both a `<hash>/` directory and a top-level
- * `<hash>.json` exist for the same project (the transition window between
- * the legacy 0.10.7 layout and the 0.10.8 per-session layout), both
- * sources are merged into a single AggregatedStats — never two rows for
- * the same project. This keeps the dashboard honest while
- * `runStartupMaintenance` / `migrateLegacyFile` finish moving the legacy
- * file into the directory in the background.
+ * Source 3 is critical: `archiveOldSessions` may have already moved a
+ * session's data to history (e.g. the old "today-only" logic archived
+ * yesterday's data, or maintenance ran before the window was widened to 7
+ * days). By including history records whose updatedAt falls within the window,
+ * the dashboard shows a complete picture even when archiving has already
+ * occurred.
  */
 export function readAllStats(): AggregatedStats[] {
   const statsDir = getStatsDir();
   if (!existsSync(statsDir)) return [];
 
-  const today = toDateString(Date.now());
+  const cutoff = Date.now() - ACTIVE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
   let entries: string[];
   try {
@@ -563,9 +616,12 @@ export function readAllStats(): AggregatedStats[] {
     return [];
   }
 
-  // Collect today's StatsFiles per hash from BOTH the directory branch
-  // (per-session 0.10.8 layout) and the top-level legacy file branch.
-  // Same hash on both sides means same project — merge them.
+  // Collect recent StatsFiles per hash from THREE sources:
+  //   (a) directory branch — per-session 0.10.8 layout
+  //   (b) top-level legacy file — pre-0.10.8 layout
+  //   (c) history directory — archived rollups within the active window
+  // Same hash on multiple sources means same project — merge them.
+  // A session is "recent" if updatedAt >= cutoff (last ACTIVE_WINDOW_DAYS).
   const sessionsByHash = new Map<string, StatsFile[]>();
 
   const addSessions = (hash: string, sessions: StatsFile[]): void => {
@@ -586,23 +642,49 @@ export function readAllStats(): AggregatedStats[] {
     try { st = statSync(full); } catch { continue; }
 
     if (st.isDirectory() && HASH_RE.test(entry)) {
-      const todaysSessions = readSessionFiles(full).filter(
-        s => toDateString(s.startedAt) === today
+      const recentSessions = readSessionFiles(full).filter(
+        s => s.updatedAt >= cutoff
       );
-      addSessions(entry, todaysSessions);
+      addSessions(entry, recentSessions);
     } else if (st.isFile() && entry.endsWith('.json') && !entry.endsWith('.tmp')) {
-      // Legacy <hash>.json — surface it only if it represents today's data,
-      // matching the directory branch above. Pre-today legacy files become
+      // Legacy <hash>.json — surface it only if it represents recent data
+      // (by updatedAt within the active window). Older legacy files become
       // visible in History after `runStartupMaintenance` archives them.
       const hash = entry.replace(/\.json$/, '');
       if (!HASH_RE.test(hash)) continue;
       try {
         const parsed = JSON.parse(readFileSync(full, 'utf8')) as StatsFile;
         if (parsed.version !== 1) continue;
-        if (toDateString(parsed.startedAt) !== today) continue;
+        if (parsed.updatedAt < cutoff) continue;
         addSessions(hash, [parsed]);
       } catch { /* skip */ }
     }
+  }
+
+  // Also include history rollups whose updatedAt falls within the active
+  // window. This covers the case where sessions were already archived
+  // (e.g. by the old "today-only" logic or by maintenance) but are still
+  // recent enough to appear in the 7-day view.
+  const historyDir = join(statsDir, HISTORY_DIR_NAME);
+  if (existsSync(historyDir)) {
+    try {
+      for (const file of readdirSync(historyDir)) {
+        if (!file.endsWith('.json')) continue;
+        // History file naming: <hash>_<date>.json — extract hash from prefix.
+        const underscoreIdx = file.lastIndexOf('_');
+        if (underscoreIdx < 0) continue;
+        const hash = file.substring(0, underscoreIdx);
+        if (!HASH_RE.test(hash)) continue;
+        try {
+          const parsed = JSON.parse(
+            readFileSync(join(historyDir, file), 'utf8')
+          ) as StatsFile;
+          if (parsed.version !== 1) continue;
+          if (parsed.updatedAt < cutoff) continue;
+          addSessions(hash, [parsed]);
+        } catch { /* skip */ }
+      }
+    } catch { /* directory read failed */ }
   }
 
   const out: AggregatedStats[] = [];
@@ -610,6 +692,8 @@ export function readAllStats(): AggregatedStats[] {
     const agg = aggregateSessions(sessions);
     out.push({ ...agg, hash, sessionCount: sessions.length });
   }
+  // Sort by updatedAt descending — most recently active projects first.
+  out.sort((a, b) => b.updatedAt - a.updatedAt);
   return out;
 }
 

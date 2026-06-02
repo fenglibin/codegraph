@@ -2,7 +2,7 @@
  * Dashboard API — handles HTTP routes for the CodeGraph dashboard.
  *
  * Routes:
- *   GET /api/stats           — all projects' current aggregated stats (today's sessions)
+ *   GET /api/stats           — all projects' current aggregated stats (last 7 days' sessions)
  *   GET /api/stats/:hash     — one project's current aggregated stats
  *   GET /api/sessions/:hash  — one project's per-session breakdown (newest first)
  *   GET /api/history/:hash   — one project's daily history (30 days, oldest first)
