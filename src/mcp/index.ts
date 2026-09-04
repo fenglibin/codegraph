@@ -19,7 +19,7 @@ import * as path from 'path';
 import CodeGraph, { findNearestCodeGraphRoot } from '../index';
 import { watchDisabledReason } from '../sync';
 import { StdioTransport, JsonRpcRequest, JsonRpcNotification, ErrorCodes } from './transport';
-import { tools, normalizeToolName, ToolHandler } from './tools';
+import { tools, ToolHandler } from './tools';
 import { buildServerInstructions } from './server-instructions';
 import { StatsWriter } from './stats-writer';
 import { debugLog, debugLogSessionStart, debugWarn, debugError } from './debug-log';
@@ -491,31 +491,18 @@ export class MCPServer {
       return;
     }
 
-    const rawName = params.name;
+    const toolName = params.name;
     const toolArgs = params.arguments || {};
 
-    // Validate tool exists.
-    // Fast path: exact match (99.9%+ of calls).
-    // Fallback: normalize common LLM casing mistakes — some models habitually
-    // convert snake_case → PascalCase/camelCase (e.g. "CodegraphSearch" instead
-    // of "codegraph_search"). Normalization is server-side only — the tool list
-    // stays clean at 11 entries.
-    let toolName: string = rawName;
-    let tool = tools.find(t => t.name === toolName);
+    // Validate tool exists
+    const tool = tools.find(t => t.name === toolName);
     if (!tool) {
-      const normalized = normalizeToolName(rawName);
-      if (normalized) {
-        debugLog('tools/call', `Model used "${rawName}" instead of "${normalized}" — auto-correcting`);
-        toolName = normalized;
-        tool = tools.find(t => t.name === toolName)!;
-      } else {
-        this.transport.sendError(
-          request.id,
-          ErrorCodes.InvalidParams,
-          `Unknown tool: ${rawName}`
-        );
-        return;
-      }
+      this.transport.sendError(
+        request.id,
+        ErrorCodes.InvalidParams,
+        `Unknown tool: ${toolName}`
+      );
+      return;
     }
 
     // If the default project isn't initialized yet, retry in case it was

@@ -734,45 +734,6 @@ export const tools: ToolDefinition[] = [
 ];
 
 /**
- * Normalize a tool name that may be in a non-canonical casing.
- *
- * Some LLM models (especially Chinese domestic models) habitually convert
- * snake_case MCP tool names to PascalCase or camelCase — e.g. they call
- * `CodegraphSearch` or `codegraphSearch` instead of `codegraph_search`.
- * Rather than cluttering `tools/list` with duplicate alias entries, we
- * normalize at dispatch time with zero overhead for correctly-named calls
- * (exact match is tried first).
- *
- * The normalization strips the case-insensitive "codegraph" prefix and
- * converts the remaining PascalCase/camelCase suffix to snake_case.
- *
- * Returns the canonical name when the normalized form matches exactly one
- * known tool, or `null` when the input cannot be resolved.
- *
- * @internal Exported for unit testing convenience.
- */
-export function normalizeToolName(raw: string): string | null {
-  // Exact match — already canonical (fast path for >99.9% of calls)
-  if (tools.some(t => t.name === raw)) return raw;
-
-  // Strip case-insensitive "codegraph" prefix (with optional underscore/hyphen)
-  const m = raw.match(/^codegraph[_-]?(.+)$/i);
-  if (!m) return null;
-  const suffix = m[1]!; // `.+/` guarantees capture group 1 is non-empty when matched
-
-  // Convert PascalCase/camelCase suffix to snake_case
-  const snake = suffix
-    .replace(/([A-Z])/g, '_$1')
-    .replace(/^_/, '')
-    .toLowerCase();
-
-  const normalized = `codegraph_${snake}`;
-
-  // Verify it resolves to exactly one known tool (defense against ambiguities)
-  return tools.some(t => t.name === normalized) ? normalized : null;
-}
-
-/**
  * Per-tool usage statistics collected in memory during a server session.
  * Reset on process restart.
  */
@@ -841,21 +802,8 @@ export class ToolHandler {
    * Get tool definitions with dynamic descriptions based on project size.
    * The codegraph_explore tool description includes a budget recommendation
    * scaled to the number of indexed files.
-   *
-   * PascalCase aliases (e.g. CodegraphSearch → codegraph_search) are appended
-   * to accommodate LLM models that habitually convert snake_case tool names to
-   * PascalCase. The model can call either form — dispatch-time normalization in
-   * handleToolsCall converts back to canonical form before execution.
    */
   getTools(): ToolDefinition[] {
-    const base = this.buildBaseTools();
-    return this.appendPascalCaseAliases(base);
-  }
-
-  /**
-   * Build the base tool list with dynamic descriptions.
-   */
-  private buildBaseTools(): ToolDefinition[] {
     if (!this.cg) return tools;
 
     try {
@@ -874,40 +822,6 @@ export class ToolHandler {
     } catch {
       return tools;
     }
-  }
-
-  /**
-   * Append PascalCase aliases for each tool to support LLM models that
-   * incorrectly convert snake_case names (e.g. CodegraphSearch for
-   * codegraph_search). Dispatch-time normalization in handleToolsCall
-   * converts back to the canonical name, so the duplicated entries are
-   * purely for client-side name validation.
-   *
-   * The alias follows the pattern `Codegraph<Rest>` where Rest is the
-   * PascalCase version of the suffix after the `codegraph_` prefix.
-   */
-  private appendPascalCaseAliases(base: ToolDefinition[]): ToolDefinition[] {
-    const aliases: ToolDefinition[] = [];
-    for (const tool of base) {
-      // Skip tools that aren't in the standard `codegraph_*` naming scheme
-      const m = tool.name.match(/^codegraph_(.+)$/);
-      if (!m) continue;
-
-      const suffix = m[1]!;
-      // snake_case → PascalCase (e.g. "context" → "Context", "index_age" → "IndexAge")
-      const pascalSuffix = suffix
-        .split('_')
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-        .join('');
-      const aliasName = `Codegraph${pascalSuffix}`;
-
-      aliases.push({
-        name: aliasName,
-        description: `Alias for ${tool.name}. ${tool.description}`,
-        inputSchema: tool.inputSchema,
-      });
-    }
-    return [...base, ...aliases];
   }
 
   /**
