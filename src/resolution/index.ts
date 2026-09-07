@@ -545,21 +545,41 @@ export class ReferenceResolver {
   }
 
   /**
+   * Convert resolved references to edges and persist them, dropping any edge
+   * whose target node no longer exists. The resolved target is heuristic
+   * (name/fuzzy match), so an incremental sync that deleted/re-inserted nodes
+   * (line shifts change node IDs) may leave a stale target. Inserting an edge
+   * whose target is gone violates the edges.target FOREIGN KEY and aborts the
+   * entire run; filter those out here so one bad edge never fails the sync.
+   */
+  persistResolvedEdges(resolved: ResolvedRef[]): void {
+    const edges = this.createEdges(resolved).filter(
+      (e) => this.queries.getNodeById(e.target) !== null
+    );
+    if (edges.length > 0) {
+      this.queries.insertEdges(edges);
+    }
+  }
+
+  /**
    * Resolve and persist edges to database
    */
   resolveAndPersist(
     unresolvedRefs: UnresolvedReference[],
     onProgress?: (current: number, total: number) => void
   ): ResolutionResult {
+    // Invalidate node/name caches before resolving. An incremental sync may
+    // have deleted and re-inserted nodes (line-number shifts change node IDs),
+    // leaving stale IDs in the resolver caches. Resolving against stale nodes
+    // produces edges whose target no longer exists → FOREIGN KEY constraint
+    // failed. Rebuild caches from the current DB state instead.
+    this.clearCaches();
+
     const result = this.resolveAll(unresolvedRefs, onProgress);
 
-    // Create edges from resolved references
-    const edges = this.createEdges(result.resolved);
-
-    // Insert edges into database
-    if (edges.length > 0) {
-      this.queries.insertEdges(edges);
-    }
+    // Create edges from resolved references and persist them (dropping any
+    // whose target node was deleted by the incremental sync — FK guard).
+    this.persistResolvedEdges(result.resolved);
 
     // Clean up resolved refs from unresolved_refs table so metrics are accurate
     if (result.resolved.length > 0) {
@@ -584,6 +604,10 @@ export class ReferenceResolver {
     onProgress?: (current: number, total: number) => void,
     batchSize: number = 5000
   ): Promise<ResolutionResult> {
+    // Same stale-cache guard as resolveAndPersist: drop node/name caches so
+    // resolution reads the post-sync DB rather than nodes deleted during an
+    // incremental sync (see FOREIGN KEY guard note above).
+    this.clearCaches();
     this.warmCaches();
 
     const total = this.queries.getUnresolvedReferencesCount();
@@ -603,11 +627,8 @@ export class ReferenceResolver {
 
       const result = this.resolveAll(batch);
 
-      // Persist edges immediately
-      const edges = this.createEdges(result.resolved);
-      if (edges.length > 0) {
-        this.queries.insertEdges(edges);
-      }
+      // Persist edges immediately (dropping any with a stale target — FK guard)
+      this.persistResolvedEdges(result.resolved);
 
       // Clean up resolved refs so they don't appear in the next batch
       if (result.resolved.length > 0) {

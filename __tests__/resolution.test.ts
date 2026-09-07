@@ -645,6 +645,131 @@ def bootstrap():
       );
       expect(callsToUserService).toHaveLength(0);
     });
+
+    it('re-resolves moved symbols after incremental sync without FOREIGN KEY errors', async () => {
+      const srcDir = path.join(tempDir, 'src');
+      fs.mkdirSync(srcDir, { recursive: true });
+
+      // Both symbols live in one file so caller() → helperFunction() resolves
+      // via exact-name matching, which populates the resolver's name cache.
+      const writeHelper = (withHeader: boolean) => {
+        const header = withHeader
+          ? '// header comment\n// another comment\n// third comment\n// fourth comment\n// fifth comment\n'
+          : '';
+        fs.writeFileSync(
+          path.join(srcDir, 'helper.ts'),
+          `${header}export function helperFunction(): string {
+  return 'hello';
+}
+
+export function caller(): string {
+  return helperFunction();
+}`
+        );
+      };
+
+      writeHelper(false);
+      cg = await CodeGraph.init(tempDir, { index: true });
+
+      const before = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'helperFunction');
+      expect(before).toBeDefined();
+
+      // Insert a header comment so helperFunction's line shifts → its node ID
+      // changes (generateNodeId hashes file:kind:name:line).
+      writeHelper(true);
+
+      // Incremental sync must NOT throw FOREIGN KEY constraint failed.
+      const result = await cg.sync();
+      expect(result.filesModified).toBe(1);
+
+      const after = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'helperFunction');
+      expect(after).toBeDefined();
+      expect(after!.id).not.toBe(before!.id);
+
+      const caller = cg.getNodesByKind('function').find((n) => n.name === 'caller');
+      expect(caller).toBeDefined();
+      const outgoing = cg.getOutgoingEdges(caller!.id);
+      expect(outgoing.some((e) => e.target === after!.id)).toBe(true);
+    });
+
+    it('persistResolvedEdges drops edges whose target no longer exists (FK guard)', () => {
+      const dbPath = path.join(tempDir, 'codegraph.db');
+      const db = DatabaseConnection.initialize(dbPath);
+      const queries = new QueryBuilder(db.getDb());
+
+      // Insert a source node and a real target node.
+      queries.insertNode({
+        id: 'func:main.ts:caller:1',
+        kind: 'function',
+        name: 'caller',
+        qualifiedName: 'main.ts::caller',
+        filePath: 'main.ts',
+        language: 'typescript',
+        startLine: 1,
+        endLine: 2,
+        startColumn: 0,
+        endColumn: 1,
+        updatedAt: Date.now(),
+      });
+      queries.insertNode({
+        id: 'func:helper.ts:realHelper:1',
+        kind: 'function',
+        name: 'realHelper',
+        qualifiedName: 'helper.ts::realHelper',
+        filePath: 'helper.ts',
+        language: 'typescript',
+        startLine: 1,
+        endLine: 2,
+        startColumn: 0,
+        endColumn: 1,
+        updatedAt: Date.now(),
+      });
+
+      const resolver = createResolver(tempDir, queries);
+
+      // A valid edge (target exists) must be persisted, while a stale edge
+      // (target deleted by an incremental sync) must be dropped without
+      // throwing a FOREIGN KEY error.
+      resolver.persistResolvedEdges([
+        {
+          original: {
+            fromNodeId: 'func:main.ts:caller:1',
+            referenceName: 'realHelper',
+            referenceKind: 'calls',
+            line: 1,
+            column: 10,
+            filePath: 'main.ts',
+            language: 'typescript',
+          },
+          targetNodeId: 'func:helper.ts:realHelper:1',
+          confidence: 0.9,
+          resolvedBy: 'exact-match',
+        },
+        {
+          original: {
+            fromNodeId: 'func:main.ts:caller:1',
+            referenceName: 'helperFunction',
+            referenceKind: 'calls',
+            line: 1,
+            column: 20,
+            filePath: 'main.ts',
+            language: 'typescript',
+          },
+          targetNodeId: 'func:helper.ts:helperFunction:42',
+          confidence: 0.9,
+          resolvedBy: 'exact-match',
+        },
+      ]);
+
+      const edges = queries.getOutgoingEdges('func:main.ts:caller:1');
+      expect(edges).toHaveLength(1);
+      expect(edges[0]!.target).toBe('func:helper.ts:realHelper:1');
+      db.close();
+    });
   });
 
   describe('Name Matcher: kind bias for new ref kinds', () => {
