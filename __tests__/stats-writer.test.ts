@@ -53,6 +53,12 @@ function sessionFilePath(project: string, startedAt: number): string {
   return join(tmpHome, '.codegraph', 'stats', hash, `${startedAt}_${process.pid}.json`);
 }
 
+/** `YYYY-MM-DD` for `days` days ago, in local time (matches stats-writer's toDateString). */
+function dateDaysAgo(days: number): string {
+  const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 describe('StatsWriter', () => {
   describe('projectHash', () => {
     it('returns a 12-char hex string', () => {
@@ -480,13 +486,19 @@ describe('StatsWriter', () => {
       const historyDir = join(tmpHome, '.codegraph', 'stats', 'history');
       mkdirSync(historyDir, { recursive: true });
 
-      writeFileSync(join(historyDir, 'abc123def456_2026-03-29.json'), '{"version":1}');
-      writeFileSync(join(historyDir, 'abc123def456_2026-05-27.json'), '{"version":1}');
+      // Dates relative to "now" so the test doesn't rot as wall-clock time
+      // passes: a hardcoded date inside the 30-day window at write-time
+      // eventually falls outside it, and cleanup (correctly) removes it.
+      const stale = dateDaysAgo(45); // > 30 days → must be removed
+      const fresh = dateDaysAgo(10); // < 30 days → must be kept
+
+      writeFileSync(join(historyDir, `abc123def456_${stale}.json`), '{"version":1}');
+      writeFileSync(join(historyDir, `abc123def456_${fresh}.json`), '{"version":1}');
 
       cleanupOldHistory();
 
-      expect(existsSync(join(historyDir, 'abc123def456_2026-03-29.json'))).toBe(false);
-      expect(existsSync(join(historyDir, 'abc123def456_2026-05-27.json'))).toBe(true);
+      expect(existsSync(join(historyDir, `abc123def456_${stale}.json`))).toBe(false);
+      expect(existsSync(join(historyDir, `abc123def456_${fresh}.json`))).toBe(true);
     });
   });
 
